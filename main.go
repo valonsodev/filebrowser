@@ -63,7 +63,7 @@ var (
 			"1.0":  &atomic.Uint64{},
 			"+Inf": &atomic.Uint64{},
 		},
-		"POST": {
+		"PUT": {
 			"0.1":  &atomic.Uint64{},
 			"0.5":  &atomic.Uint64{},
 			"1.0":  &atomic.Uint64{},
@@ -71,12 +71,12 @@ var (
 		},
 	}
 	requestDurationSum   = map[string]*atomic.Uint64{
-		"GET":  &atomic.Uint64{},
-		"POST": &atomic.Uint64{},
+		"GET": &atomic.Uint64{},
+		"PUT": &atomic.Uint64{},
 	}
 	requestDurationCount = map[string]*atomic.Uint64{
-		"GET":  &atomic.Uint64{},
-		"POST": &atomic.Uint64{},
+		"GET": &atomic.Uint64{},
+		"PUT": &atomic.Uint64{},
 	}
 )
 
@@ -98,7 +98,6 @@ func main() {
 	os.MkdirAll(filesDir, os.ModePerm)
 
 	http.HandleFunc("/", pathHandler)
-	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/metrics", metricsHandler)
 
 	log.Printf("Server running at http://localhost%s", port)
@@ -129,6 +128,11 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL.Path != "/metrics" {
 		httpRequestsTotal.Add(1)
+	}
+
+	if r.Method == "PUT" {
+		handlePutUpload(w, r)
+		return
 	}
 
 	urlPath := r.URL.Path
@@ -283,70 +287,67 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 	tmpl.Execute(w, data)
 }
 
-func uploadHandler(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
-	defer func() {
-		duration := time.Since(start).Seconds()
-		recordRequestDuration(r.Method, duration)
-	}()
-
+func handlePutUpload(w http.ResponseWriter, r *http.Request) {
 	uploadsTotal.Add(1)
 
 	if !enableUpload {
 		uploadsError.Add(1)
+		httpRequestsError.Add(1)
 		http.Error(w, "File uploads are disabled", http.StatusForbidden)
 		return
 	}
 
-	if r.Method != "POST" {
-		http.Redirect(w, r, "/", http.StatusSeeOther)
-		return
-	}
-
-	targetDir := r.FormValue("dir")
-	if targetDir == "" {
-		targetDir = "/"
-	}
-
-	fullPath := filepath.Join(filesDir, filepath.Clean(targetDir))
-	os.MkdirAll(fullPath, os.ModePerm)
-
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		uploadsError.Add(1)
-		http.Error(w, "Invalid upload", http.StatusBadRequest)
-		return
-	}
-	defer file.Close()
-
-	filename := strings.ReplaceAll(header.Filename, "/", "_")
-	finalPath := filepath.Join(fullPath, filename)
+	urlPath := r.URL.Path
+	fullPath := filepath.Join(filesDir, urlPath)
 
 	absFilesDir, _ := filepath.Abs(filesDir)
-	absFinalPath, _ := filepath.Abs(finalPath)
-	if !strings.HasPrefix(absFinalPath, absFilesDir) {
+	absPath, _ := filepath.Abs(fullPath)
+	if !strings.HasPrefix(absPath, absFilesDir) {
 		uploadsError.Add(1)
+		httpRequestsError.Add(1)
 		http.Error(w, "Invalid file path", http.StatusForbidden)
 		return
 	}
 
-	dst, err := os.Create(finalPath)
+	if strings.HasSuffix(urlPath, "/") {
+		uploadsError.Add(1)
+		httpRequestsError.Add(1)
+		http.Error(w, "Cannot upload to a directory path", http.StatusBadRequest)
+		return
+	}
+
+	// Create parent directory if it doesn't exist
+	parentDir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(parentDir, os.ModePerm); err != nil {
+		uploadsError.Add(1)
+		httpRequestsError.Add(1)
+		http.Error(w, "Unable to create directory", http.StatusInternalServerError)
+		return
+	}
+
+	// Create or overwrite the file
+	dst, err := os.Create(fullPath)
 	if err != nil {
 		uploadsError.Add(1)
-		http.Error(w, "Unable to save file", http.StatusInternalServerError)
+		httpRequestsError.Add(1)
+		http.Error(w, "Unable to create file", http.StatusInternalServerError)
 		return
 	}
 	defer dst.Close()
 
-	_, err = io.Copy(dst, file)
+	// Copy the request body to the file
+	_, err = io.Copy(dst, r.Body)
 	if err != nil {
 		uploadsError.Add(1)
+		httpRequestsError.Add(1)
 		http.Error(w, "Error saving file", http.StatusInternalServerError)
 		return
 	}
 
 	uploadsSuccess.Add(1)
-	http.Redirect(w, r, targetDir, http.StatusSeeOther)
+	httpRequestsSuccess.Add(1)
+	w.WriteHeader(http.StatusCreated)
+	fmt.Fprintf(w, "File uploaded successfully to %s\n", urlPath)
 }
 
 func recordRequestDuration(method string, duration float64) {
@@ -602,7 +603,7 @@ const htmlTemplate = `<!DOCTYPE html>
   .name { width: 60%; overflow: hidden; text-overflow: ellipsis; }
   .size { width: 15%; }
   .date { width: 25%; }
-  .upload-form { display: flex; align-items: center; }
+  .upload-form { display: flex; align-items: center; gap: 5px; }
   .search-box {
     padding: 4px;
     width: 100%;
@@ -653,7 +654,6 @@ const htmlTemplate = `<!DOCTYPE html>
   }
   button {
     padding: 4px 8px;
-    margin-left: 5px;
     background: var(--header-bg);
     color: var(--text-color);
     border: 1px solid var(--border-color);
@@ -698,14 +698,13 @@ const htmlTemplate = `<!DOCTYPE html>
   <header>
     <h1>{{range .Breadcrumbs}}<a href="{{.URL}}">{{.Label}}</a>{{end}}</h1>
     <input type="text" id="search" class="search-box" placeholder="Filter by filename..." autocomplete="off">
-    <form class="upload-form" action="/upload" method="post" enctype="multipart/form-data">
-      <input type="hidden" name="dir" value="{{.CurrentPath}}">
-      <input type="file" name="file" id="file-input" required {{if .DisableUpload}}disabled{{end}}>
+    <div class="upload-form">
+      <input type="file" id="file-input" {{if .DisableUpload}}disabled{{end}}>
       <label for="file-input" class="file-input-label{{if .DisableUpload}} disabled{{end}}" id="file-label">
         {{if .DisableUpload}}Uploads disabled{{else}}Choose file...{{end}}
       </label>
-      <button type="submit" {{if .DisableUpload}}disabled{{end}}>Upload</button>
-    </form>
+      <button id="upload-btn" {{if .DisableUpload}}disabled{{end}}>Upload</button>
+    </div>
   </header>
 
   <main>
@@ -754,11 +753,41 @@ const htmlTemplate = `<!DOCTYPE html>
       html.setAttribute('data-theme', next);
     }
 
-    document.getElementById('file-input').addEventListener('change', function(e) {
+    const fileInput = document.getElementById('file-input');
+    const uploadBtn = document.getElementById('upload-btn');
+    const dragMessage = document.getElementById('drag-message');
+    const currentPath = '{{.CurrentPath}}';
+
+    async function uploadFile(file) {
+      const uploadPath = currentPath + file.name;
+
+      try {
+        const response = await fetch(uploadPath, {
+          method: 'PUT',
+          body: file
+        });
+
+        if (response.ok) {
+          window.location.reload();
+        } else {
+          const error = await response.text();
+          alert('Upload failed: ' + error);
+        }
+      } catch (error) {
+        alert('Upload failed: ' + error.message);
+      }
+    }
+
+    fileInput.addEventListener('change', function(e) {
       const label = document.getElementById('file-label');
       if (e.target.disabled) return;
       const fileName = e.target.files[0]?.name || 'Choose file...';
       label.textContent = fileName;
+    });
+
+    uploadBtn.addEventListener('click', function() {
+      if (fileInput.disabled || !fileInput.files[0]) return;
+      uploadFile(fileInput.files[0]);
     });
 
     document.getElementById('search').addEventListener('input', function(e) {
@@ -776,9 +805,6 @@ const htmlTemplate = `<!DOCTYPE html>
     });
 
     // Drag and drop functionality
-    const fileInput = document.getElementById('file-input');
-    const dragMessage = document.getElementById('drag-message');
-
     function showDragMessage(text) {
       dragMessage.className = 'drag-disabled';
       dragMessage.textContent = text;
@@ -803,9 +829,8 @@ const htmlTemplate = `<!DOCTYPE html>
       e.preventDefault();
       hideDragMessage();
       if (!fileInput.disabled && e.dataTransfer.files.length > 0) {
-        fileInput.files = e.dataTransfer.files;
-        const label = document.getElementById('file-label');
-        label.textContent = e.dataTransfer.files[0].name;
+        const file = e.dataTransfer.files[0];
+        uploadFile(file);
       }
     });
   </script>
