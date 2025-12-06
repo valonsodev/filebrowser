@@ -21,6 +21,6 @@ jobs:
           docker build -t hub.fran.cam/filebrowser:latest .
 
       - name: Push runner image
-        if: ${{ forgejo.event_name == 'push' }}
+        if: github.event_name == 'push'
         run: |
           docker push hub.fran.cam/filebrowser:latest
