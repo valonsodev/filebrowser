@@ -1,4 +1,4 @@
-name: Build and Push to hub.fran.cam
+name: Build and Push to repository
 
 on:
   push:
@@ -18,9 +18,14 @@ jobs:
 
       - name: Build runner image
         run: |
-          docker build -t hub.fran.cam/filebrowser:latest .
+          docker build -t git.fran.cam/homelab/filebrowser:latest .
+
+      - name: Login to registry
+        if: github.event_name == 'push'
+        run: |
+          echo "${{ secrets.BOT_PASSWORD }}" | docker login git.fran.cam -u "bot@fran.cam" --password-stdin
 
       - name: Push runner image
         if: github.event_name == 'push'
         run: |
-          docker push hub.fran.cam/filebrowser:latest
+          docker push git.fran.cam/homelab/filebrowser:latest
