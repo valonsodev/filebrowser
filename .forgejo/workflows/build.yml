@@ -11,7 +11,7 @@ jobs:
   build:
     runs-on: docker
     container:
-      image: hub.fran.cam/runner:latest@sha256:233244a2d8c27f35c173911bc5b484f03050eebd83f59ae11429e8635d41ca2a
+      image: hub.fran.cam/runner:latest@sha256:39d7250339ad2ab10c93a1b2376724e937393d339fe02b4a8679cfe7861d3167
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
