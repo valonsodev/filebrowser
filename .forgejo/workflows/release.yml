@@ -9,17 +9,12 @@ jobs:
   release:
     runs-on: docker
     container:
-      image: git.fran.cam/homelab/runner:latest@sha256:81686ce4c019de0f7c46bb93666289062a7a679e76f44a8bdd3c4a4d49dc4316
+      image: git.fran.cam/homelab/runner:latest@sha256:47b10bd0c06e296e37c53360ed1ee1f9b1799ab3753adc0a8b3eff409656a21d
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.25'
 
       - name: Get version
         id: version
@@ -28,28 +23,23 @@ jobs:
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "Building version: ${VERSION}"
 
-      - name: Build binaries
+      - name: Build Docker image
         run: |
           VERSION=${{ steps.version.outputs.version }}
-          GIT_COMMIT=$(git rev-parse --short HEAD)
-          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          LDFLAGS="-s -w -X main.GitCommit=${GIT_COMMIT} -X main.BuildDate=${BUILD_DATE}"
+          docker build -t git.fran.cam/homelab/filebrowser:${VERSION} .
+          docker tag git.fran.cam/homelab/filebrowser:${VERSION} git.fran.cam/homelab/filebrowser:latest
 
-          mkdir -p dist
-
-          # Linux AMD64
-          GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o dist/filebrowser-linux-amd64 main.go
-
-          # Linux ARM64
-          GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "${LDFLAGS}" -o dist/filebrowser-linux-arm64 main.go
-
-      - name: Generate checksums
+      - name: Login to registry
         run: |
-          cd dist
-          sha256sum * > checksums.txt
-          cat checksums.txt
+          echo "${{ secrets.BOT_PASSWORD }}" | docker login git.fran.cam -u "bot@fran.cam" --password-stdin
 
-      - name: publish release
+      - name: Push Docker images
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          docker push git.fran.cam/homelab/filebrowser:${VERSION}
+          docker push git.fran.cam/homelab/filebrowser:latest
+
+      - name: Create release
         uses: https://code.forgejo.org/actions/forgejo-release@v2.5.0
         with:
           url: "https://git.fran.cam"
@@ -57,7 +47,6 @@ jobs:
           direction: upload
           tag: "${{ github.ref_name }}"
           sha: "${{ github.sha }}"
-          release-dir: release
           token: ${{ secrets.TOKEN }}
           override: ${{ vars.OVERRIDE || "false" }}
           verbose: ${{ vars.VERBOSE || "false" }}
