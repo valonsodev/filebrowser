@@ -655,6 +655,17 @@ const htmlTemplate = `<!DOCTYPE html>
     text-overflow: ellipsis;
   }
   .file-input-label:hover { opacity: 0.8; }
+  .paste-form textarea {
+    flex-grow: 1;
+    padding: 4px 8px;
+    font-family: monospace;
+    font-size: 14px;
+    background: var(--header-bg);
+    color: var(--text-color);
+    border: 1px solid var(--border-color);
+    resize: vertical;
+    min-height: 1.5em;
+  }
   .file-input-label:disabled,
   .file-input-label.disabled {
     opacity: 0.5;
@@ -730,6 +741,12 @@ const htmlTemplate = `<!DOCTYPE html>
       </label>
       <button id="upload-btn" {{if .DisableUpload}}disabled{{end}}>Upload</button>
     </div>
+    {{if not .DisableUpload}}
+    <div class="upload-form paste-form">
+      <textarea id="paste-input" placeholder="Paste or type text here..." rows="1"></textarea>
+      <button id="paste-btn">Upload text</button>
+    </div>
+    {{end}}
   </header>
 
   <main>
@@ -858,6 +875,33 @@ const htmlTemplate = `<!DOCTYPE html>
         uploadFile(file);
       }
     });
+
+    function generatePasteName() {
+      const now = new Date();
+      const pad = (n) => String(n).padStart(2, '0');
+      return 'paste-' + now.getFullYear() + '-' + pad(now.getMonth()+1) + '-' + pad(now.getDate()) + '-' + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()) + '.txt';
+    }
+
+    function uploadText(text) {
+      if (!text) return;
+      const file = new File([text], generatePasteName(), { type: 'text/plain' });
+      uploadFile(file);
+    }
+
+    document.addEventListener('paste', function(e) {
+      if (fileInput.disabled) return;
+      if (document.activeElement?.id === 'paste-input') return;
+      const text = e.clipboardData?.getData('text/plain');
+      uploadText(text);
+    });
+
+    const pasteBtn = document.getElementById('paste-btn');
+    if (pasteBtn) {
+      pasteBtn.addEventListener('click', function() {
+        const textarea = document.getElementById('paste-input');
+        uploadText(textarea.value);
+      });
+    }
   </script>
 </body>
 </html>`
