@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>{{.Title}}</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3 1h6l4 4v10H3z' fill='none' stroke='%23888' stroke-width='1.2'/><path d='M9 1.2V5h3.8' fill='none' stroke='%23888' stroke-width='1.2'/></svg>">
+{{.ExtraHeaders | safeHTML}}
+<style>
+  :root {
+    --bg: #1e1e1e;
+    --bg-bar: #141414;
+    --fg: #d8d8d8;
+    --fg-strong: #ffffff;
+    --muted: #8a8a8a;
+    --muted-dim: #6a6a6a;
+    --line: rgba(255,255,255,0.09);
+    --field: #2a2a2a;
+    --field-border: #3a3a3a;
+    --hover: rgba(255,255,255,0.045);
+    --accent: #e6e6e6;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  :root[data-theme="light"] {
+    --bg: #ffffff;
+    --bg-bar: #f0f0f0;
+    --fg: #1a1a1a;
+    --fg-strong: #000000;
+    --muted: #666666;
+    --muted-dim: #999999;
+    --line: rgba(0,0,0,0.12);
+    --field: #ffffff;
+    --field-border: #cccccc;
+    --hover: rgba(0,0,0,0.04);
+    --accent: #333333;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.4;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: 28px;
+    min-height: 100vh;
+  }
+
+  /* ---- Header / controls ---- */
+  .wrap { padding: 14px 16px 0; }
+  h1.root {
+    font-size: 26px;
+    font-weight: 700;
+    color: var(--fg-strong);
+    margin: 2px 0 14px;
+    word-break: break-all;
+  }
+  h1.root a { color: var(--fg-strong); text-decoration: none; }
+  h1.root a:hover { text-decoration: underline; }
+  .field {
+    width: 100%;
+    background: var(--field);
+    color: var(--fg);
+    border: 1px solid var(--field-border);
+    font-family: var(--mono);
+    font-size: 14px;
+    padding: 9px 11px;
+    outline: none;
+  }
+  .field::placeholder { color: var(--muted-dim); }
+  .field:focus { border-color: #555; }
+  textarea.field {
+    display: block;
+    resize: vertical;
+    line-height: normal;
+    min-height: 36px;
+    vertical-align: top;
+  }
+
+  .row-controls { display: flex; gap: 8px; margin-bottom: 8px; }
+  .row-controls.paste-row { align-items: flex-start; }
+  .row-controls .grow { flex: 1; min-width: 0; }
+  .btn {
+    background: var(--field);
+    color: var(--fg);
+    border: 1px solid var(--field-border);
+    font-family: var(--mono);
+    font-size: 14px;
+    padding: 9px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: #555; background: var(--hover); }
+
+  .filepick {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    background: var(--field);
+    border: 1px solid var(--field-border);
+    padding: 0 11px;
+    color: var(--muted);
+    cursor: pointer;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .filepick:hover { border-color: #555; }
+  .filepick input[type=file] { display: none; }
+
+  /* ---- Uploads in progress ---- */
+  #uploads { padding: 0 16px; }
+  #uploads:empty { display: none; }
+  .upl-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    color: var(--fg-strong);
+    font-weight: 700;
+    border-bottom: 1px solid var(--line);
+    padding: 16px 0 8px;
+  }
+  .upl-head .count { color: var(--muted); font-weight: 400; }
+  .upl-head .agg { margin-left: auto; color: var(--muted); font-weight: 400; font-size: 13px; font-variant-numeric: tabular-nums; }
+
+  .upl {
+    display: grid;
+    grid-template-columns: 18px minmax(0,1fr) auto auto;
+    grid-template-areas:
+      "ico name pct cancel"
+      "ico bar  bar bar"
+      "ico meta meta meta";
+    align-items: center;
+    column-gap: 10px;
+    row-gap: 5px;
+    padding: 11px 0 12px;
+    border-bottom: 1px solid var(--line);
+  }
+  .upl .u-ico { grid-area: ico; color: var(--muted); display: flex; }
+  .upl .u-name {
+    grid-area: name;
+    color: var(--fg-strong);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .upl .u-pct { grid-area: pct; color: var(--fg-strong); font-variant-numeric: tabular-nums; padding-left: 8px; }
+  .upl .u-cancel {
+    grid-area: cancel;
+    color: var(--muted);
+    cursor: pointer;
+    border: none;
+    background: none;
+    font-family: var(--mono);
+    font-size: 15px;
+    padding: 0 2px 0 10px;
+    line-height: 1;
+  }
+  .upl .u-cancel:hover { color: var(--fg-strong); }
+
+  .u-track {
+    grid-area: bar;
+    height: 3px;
+    background: rgba(255,255,255,0.10);
+    overflow: hidden;
+    position: relative;
+  }
+  :root[data-theme="light"] .u-track { background: rgba(0,0,0,0.10); }
+  .u-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width .28s ease;
+  }
+  .upl .u-meta {
+    grid-area: meta;
+    color: var(--muted);
+    font-size: 12.5px;
+    display: flex;
+    gap: 8px;
+  }
+
+  /* states */
+  .upl.done .u-fill { background: var(--accent); }
+  .upl.done .u-pct { color: var(--muted); }
+  .upl.error .u-fill { background: #c8553d; }
+  .upl.error .u-pct { color: #d9836f; }
+  .upl.canceled { opacity: .5; }
+  .upl.canceled .u-fill { background: var(--muted-dim); }
+  .upl.removing { opacity: 0; transition: opacity .25s ease; }
+  .u-resume {
+    grid-area: cancel;
+    border: 1px solid var(--field-border);
+    background: var(--field);
+    color: var(--fg);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 2px 8px;
+    margin-left: 10px;
+    cursor: pointer;
+  }
+  .u-resume:hover { border-color: #555; }
+
+  /* ---- File table ---- */
+  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  thead th {
+    text-align: left;
+    color: var(--fg-strong);
+    font-weight: 700;
+    border-bottom: 1px solid var(--line);
+    padding: 9px 16px;
+    white-space: nowrap;
+  }
+  thead th.c-size, tbody td.c-size { width: 120px; }
+  thead th.c-date, tbody td.c-date { width: 220px; }
+  thead th.sortable { cursor: pointer; user-select: none; }
+  thead th.sortable:hover { color: var(--accent); }
+  thead th .arrow { color: var(--muted); font-weight: 400; }
+  tbody td { padding: 8px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tbody tr:hover { background: var(--hover); }
+  td.c-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  td.c-name .ico { color: var(--muted); display: flex; flex: 0 0 auto; }
+  td.c-name a {
+    color: var(--fg);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: rgba(255,255,255,0.35);
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  :root[data-theme="light"] td.c-name a { text-decoration-color: rgba(0,0,0,0.35); }
+  td.c-name a:hover { color: var(--fg-strong); text-decoration-color: var(--fg-strong); }
+  td.c-size, td.c-date { color: var(--muted); white-space: nowrap; }
+  tr.new-row td.c-name a { color: var(--fg-strong); }
+  tr.flash { animation: flash 1.4s ease; }
+  @keyframes flash { 0% { background: rgba(255,255,255,0.14); } 100% { background: transparent; } }
+  tr.hidden { display: none; }
+
+  /* ---- Status bar ---- */
+  .statusbar {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    height: 28px;
+    background: var(--bg);
+    color: var(--muted-dim);
+    display: flex;
+    align-items: center;
+    padding: 0 14px;
+    font-size: 12.5px;
+    border-top: 1px solid var(--line);
+    z-index: 20;
+  }
+  .statusbar .right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+  .statusbar .upl-summary { color: var(--fg); font-variant-numeric: tabular-nums; }
+  .statusbar .upl-summary:empty { display: none; }
+  .theme-toggle {
+    width: 14px; height: 14px; border-radius: 50%;
+    background: linear-gradient(90deg, #d8d8d8 50%, #444 50%);
+    cursor: pointer; border: 1px solid #555;
+  }
+
+  /* ---- Drag overlay ---- */
+  .drag-msg {
+    position: fixed; inset: 0;
+    display: none; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.55);
+    color: var(--fg-strong);
+    font-size: 18px;
+    z-index: 40;
+    pointer-events: none;
+  }
+  .drag-msg.show { display: flex; }
+
+  /* ---- Mobile ---- */
+  @media (max-width: 640px) {
+    h1.root { font-size: 22px; }
+    thead th.c-date, tbody td.c-date { display: none; }
+    thead th.c-size, tbody td.c-size { width: 90px; text-align: right; }
+    .row-controls { flex-wrap: wrap; }
+    .upl-head .agg { display: none; }
+  }
+  @media (max-width: 380px) {
+    thead th.c-size, tbody td.c-size { display: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 class="root">{{range .Breadcrumbs}}<a href="{{.URL}}">{{.Label}}</a>{{end}}</h1>
+
+    <input class="field" id="search" type="text" placeholder="Filter by filename..." autocomplete="off" spellcheck="false" aria-label="Filter by filename">
+
+    {{if not .DisableUpload}}
+    <div class="row-controls" style="margin-top:8px;">
+      <label class="filepick" id="filepick">
+        <span id="filepick-label">Choose files...</span>
+        <input type="file" id="file-input" multiple>
+      </label>
+      <button class="btn" id="upload-btn">Upload</button>
+    </div>
+
+    <div class="row-controls paste-row">
+      <textarea class="field grow" id="paste-input" rows="1" placeholder="Paste or type text here..." autocomplete="off" spellcheck="false"></textarea>
+      <button class="btn" id="paste-btn">Upload text</button>
+    </div>
+    {{end}}
+  </div>
+
+  <div id="uploads" aria-live="polite"></div>
+
+  <table>
+    <thead>
+      <tr>
+        <th class="c-name sortable" data-key="name">Name</th>
+        <th class="c-size sortable" data-key="size">Size</th>
+        <th class="c-date sortable" data-key="mtime">Last Modified</th>
+      </tr>
+    </thead>
+    <tbody id="filelist">
+      {{if ne .CurrentPath "/"}}
+      <tr class="filerow parent">
+        <td class="c-name"><span class="ico">{{template "icoDir"}}</span><a href="{{.ParentURL}}">..</a></td>
+        <td class="c-size">-</td>
+        <td class="c-date">-</td>
+      </tr>
+      {{end}}
+      {{range .Files}}
+      <tr class="filerow"{{if .IsDir}} data-dir="1"{{end}} data-name="{{.Name}}" data-size="{{.SizeBytes}}" data-mtime="{{.ModUnix}}">
+        <td class="c-name"><span class="ico">{{if .IsDir}}{{template "icoDir"}}{{else}}{{template "icoFile"}}{{end}}</span><a href="{{.URL}}">{{.Name}}{{if .IsDir}}/{{end}}</a></td>
+        <td class="c-size">{{.Size}}</td>
+        <td class="c-date">{{.LastModified}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+
+  <div class="statusbar">
+    <span>Build: {{.GitCommit}} | {{.BuildDate}}</span>
+    <span class="right">
+      <span class="upl-summary" id="status-uploads"></span>
+      <span class="theme-toggle" id="theme-toggle" title="Toggle theme"></span>
+    </span>
+  </div>
+
+  <div id="drag-message" class="drag-msg"></div>
+
+  <template id="ico-file">{{template "icoFile"}}</template>
+  <template id="ico-dir">{{template "icoDir"}}</template>
+
+  <script>
+    const currentPath = '{{.CurrentPath}}';
+    const fileIco = document.getElementById('ico-file').innerHTML;
+
+    function fmtBytes(b) {
+      if (b < 1024) return b + ' B';
+      const u = ['KB','MB','GB','TB'];
+      let i = -1, n = b;
+      do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+      return (n >= 100 ? n.toFixed(0) : n.toFixed(1)) + ' ' + u[i];
+    }
+    function pad(x) { return String(x).padStart(2, '0'); }
+    function nowStamp() {
+      const d = new Date();
+      const off = -d.getTimezoneOffset();
+      const sign = off >= 0 ? '+' : '-';
+      const oh = pad(Math.floor(Math.abs(off) / 60));
+      const om = pad(Math.abs(off) % 60);
+      return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+        ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + sign + oh + ':' + om;
+    }
+
+    // ---- file table + filter ----
+    const tbody = document.getElementById('filelist');
+    const search = document.getElementById('search');
+    search.addEventListener('input', function() {
+      const q = search.value.trim().toLowerCase();
+      for (const tr of tbody.children) {
+        if (tr.classList.contains('parent')) continue;
+        const name = (tr.dataset.name || '').toLowerCase();
+        tr.classList.toggle('hidden', !!q && !name.includes(q));
+      }
+    });
+
+    // ---- column sorting ----
+    let sortKey = null, sortDir = 1;
+    function sortValue(tr, key) {
+      if (key === 'size') return parseFloat(tr.dataset.size || '0');
+      if (key === 'mtime') return parseFloat(tr.dataset.mtime || '0');
+      return (tr.dataset.name || '').toLowerCase();
+    }
+    function applySort(key) {
+      if (sortKey === key) sortDir = -sortDir;
+      else { sortKey = key; sortDir = key === 'name' ? 1 : -1; } // names asc, size/date desc
+      const rows = Array.prototype.slice.call(tbody.querySelectorAll('tr.filerow:not(.parent)'));
+      rows.sort(function(a, b) {
+        if (sortKey === 'name') {
+          // Folders first (regardless of direction) to match the server, then by name.
+          const da = a.dataset.dir === '1', db = b.dataset.dir === '1';
+          if (da !== db) return da ? -1 : 1;
+          return sortDir * (a.dataset.name || '').toLowerCase().localeCompare((b.dataset.name || '').toLowerCase());
+        }
+        const va = sortValue(a, sortKey), vb = sortValue(b, sortKey);
+        if (va < vb) return -sortDir;
+        if (va > vb) return sortDir;
+        // tie-break by name so the order is stable
+        return (a.dataset.name || '').toLowerCase().localeCompare((b.dataset.name || '').toLowerCase());
+      });
+      rows.forEach(function(r) { tbody.appendChild(r); });
+      const parent = tbody.querySelector('tr.parent');
+      if (parent) tbody.insertBefore(parent, tbody.firstChild);
+      document.querySelectorAll('thead th.sortable').forEach(function(th) {
+        let arrow = th.querySelector('.arrow');
+        if (th.dataset.key === sortKey) {
+          if (!arrow) { arrow = document.createElement('span'); arrow.className = 'arrow'; th.appendChild(arrow); }
+          arrow.textContent = sortDir > 0 ? ' ↑' : ' ↓';
+        } else if (arrow) { arrow.remove(); }
+      });
+    }
+    document.querySelectorAll('thead th.sortable').forEach(function(th) {
+      th.addEventListener('click', function() { applySort(th.dataset.key); });
+    });
+
+    function makeRow(name, size, dateStr, mtime) {
+      const tr = document.createElement('tr');
+      tr.className = 'filerow new-row flash';
+      tr.dataset.name = name;
+      tr.dataset.size = String(size);
+      tr.dataset.mtime = String(mtime);
+      const c1 = document.createElement('td'); c1.className = 'c-name';
+      const ico = document.createElement('span'); ico.className = 'ico'; ico.innerHTML = fileIco;
+      const a = document.createElement('a'); a.href = name; a.textContent = name;
+      c1.append(ico, a);
+      const c2 = document.createElement('td'); c2.className = 'c-size'; c2.textContent = fmtBytes(size);
+      const c3 = document.createElement('td'); c3.className = 'c-date'; c3.textContent = dateStr;
+      tr.append(c1, c2, c3);
+      return tr;
+    }
+    function addOrUpdateFile(name, size) {
+      const lname = name.toLowerCase();
+      const dateStr = nowStamp(), mtime = Math.floor(Date.now() / 1000);
+      let tr = null;
+      for (const r of tbody.children) {
+        if (r.classList.contains('parent')) continue;
+        if ((r.dataset.name || '').toLowerCase() === lname) { tr = r; break; }
+      }
+      if (tr) {
+        tr.dataset.size = String(size); tr.dataset.mtime = String(mtime);
+        const cs = tr.querySelector('.c-size'); if (cs) cs.textContent = fmtBytes(size);
+        const cd = tr.querySelector('.c-date'); if (cd) cd.textContent = dateStr;
+        tr.classList.add('flash');
+        setTimeout(function() { tr.classList.remove('flash'); }, 1500);
+      } else {
+        tr = makeRow(name, size, dateStr, mtime);
+        const parent = tbody.querySelector('tr.parent');
+        if (parent) parent.after(tr); else tbody.prepend(tr);
+        setTimeout(function() { tr.classList.remove('flash', 'new-row'); }, 1500);
+      }
+    }
+
+    // ---- uploads (draft-ietf-httpbis-resumable-upload) ----
+    const uploadsEl = document.getElementById('uploads');
+    const statusEl = document.getElementById('status-uploads');
+    const CHUNK = 5 * 1024 * 1024;
+    const PARTIAL_TYPE = 'application/partial-upload';
+    const MAX_CONCURRENT = 3;
+    const DISMISS_MS = 5000;
+
+    const queue = [];
+    let running = 0;
+    const uploaders = new Set();
+
+    function pump() {
+      while (running < MAX_CONCURRENT && queue.length) {
+        const u = queue.shift();
+        if (u.canceled) continue;
+        running++;
+        u.run().finally(function() { running--; pump(); });
+      }
+    }
+    function enqueue(u) { queue.push(u); pump(); }
+    function enqueueFiles(list) {
+      for (const f of list) { if (f) new Uploader(f); }
+      pump();
+    }
+
+    function renderHead() {
+      let head = uploadsEl.querySelector('.upl-head');
+      if (uploaders.size === 0) { if (head) head.remove(); return; }
+      if (!head) {
+        head = document.createElement('div');
+        head.className = 'upl-head';
+        head.innerHTML = '<span class="title">Uploading</span> <span class="count"></span> <span class="agg"></span>';
+        uploadsEl.prepend(head);
+      }
+      let active = 0, sent = 0, all = 0, speed = 0;
+      uploaders.forEach(function(u) {
+        all += u.size; sent += u.loaded;
+        if (u.status === 'uploading') { active++; speed += u.speed || 0; }
+      });
+      head.querySelector('.count').textContent = '(' + (active || uploaders.size) + ')';
+      const pct = all ? Math.floor(sent / all * 100) : 0;
+      head.querySelector('.agg').textContent = active ? (pct + '% · ' + fmtBytes(speed) + '/s') : '';
+    }
+    function renderStatus() {
+      let active = 0, sent = 0, all = 0;
+      uploaders.forEach(function(u) {
+        if (u.status === 'uploading') { active++; sent += u.loaded; all += u.size; }
+      });
+      statusEl.textContent = active
+        ? ('↑ ' + active + ' uploading · ' + (all ? Math.floor(sent / all * 100) : 0) + '%')
+        : '';
+    }
+
+    class Uploader {
+      constructor(file) {
+        this.file = file;
+        this.name = file.name;
+        this.size = file.size;
+        this.offset = 0;
+        this.loaded = 0;
+        this.location = null;
+        this.completed = false;
+        this.canceled = false;
+        this.status = 'queued';
+        this.speed = 0;
+        this.errMsg = null;
+        this.xhr = null;
+        this.lastT = null;
+        this.lastBytes = 0;
+        this.build();
+        queue.push(this);
+      }
+
+      build() {
+        const el = document.createElement('div');
+        el.className = 'upl';
+        el.innerHTML =
+          '<span class="u-ico">' + fileIco + '</span>' +
+          '<span class="u-name"></span>' +
+          '<span class="u-pct">0%</span>' +
+          '<button class="u-cancel" title="Cancel" aria-label="Cancel upload">×</button>' +
+          '<div class="u-track"><div class="u-fill"></div></div>' +
+          '<div class="u-meta"></div>';
+        const nm = el.querySelector('.u-name');
+        nm.textContent = this.name; nm.title = this.name;
+        this.el = el;
+        this.fill = el.querySelector('.u-fill');
+        this.pctEl = el.querySelector('.u-pct');
+        this.metaEl = el.querySelector('.u-meta');
+        el.querySelector('.u-cancel').addEventListener('click', () => this.cancel());
+        uploadsEl.appendChild(el);
+        uploaders.add(this);
+        this.render();
+      }
+
+      render() {
+        const pct = this.size > 0 ? Math.min(100, Math.floor(this.loaded / this.size * 100)) : (this.completed ? 100 : 0);
+        this.fill.style.width = pct + '%';
+        if (this.status === 'uploading') {
+          this.pctEl.textContent = pct + '%';
+          const remain = this.speed > 0 ? (this.size - this.loaded) / this.speed : 0;
+          this.metaEl.innerHTML =
+            '<span>' + fmtBytes(this.loaded) + ' / ' + fmtBytes(this.size) + '</span>' +
+            '<span>' + fmtBytes(this.speed) + '/s</span>' +
+            (remain > 0 ? '<span>' + Math.ceil(remain) + 's left</span>' : '');
+        } else if (this.status === 'done') {
+          this.pctEl.textContent = 'done';
+          this.metaEl.innerHTML = '<span>' + fmtBytes(this.size) + '</span><span>uploaded</span>';
+        } else if (this.status === 'error') {
+          this.pctEl.textContent = 'failed';
+          this.metaEl.innerHTML = '<span>' + fmtBytes(this.loaded) + ' / ' + fmtBytes(this.size) + '</span><span>' + (this.errMsg || 'failed') + '</span>';
+        } else if (this.status === 'canceled') {
+          this.pctEl.textContent = 'canceled';
+          this.metaEl.innerHTML = '<span>' + fmtBytes(this.size) + '</span>';
+        } else {
+          this.pctEl.textContent = this.status;
+          this.metaEl.innerHTML = '';
+        }
+        renderHead(); renderStatus();
+      }
+
+      setClass() {
+        this.el.classList.toggle('done', this.status === 'done');
+        this.el.classList.toggle('error', this.status === 'error');
+        this.el.classList.toggle('canceled', this.status === 'canceled');
+      }
+
+      onProgress(loaded) {
+        const now = performance.now();
+        if (this.lastT != null) {
+          const dt = (now - this.lastT) / 1000;
+          if (dt >= 0.15) {
+            const inst = Math.max(0, (loaded - this.lastBytes) / dt);
+            this.speed = this.speed ? this.speed * 0.6 + inst * 0.4 : inst;
+            this.lastT = now; this.lastBytes = loaded;
+          }
+        } else { this.lastT = now; this.lastBytes = loaded; }
+        this.loaded = loaded;
+        this.render();
+      }
+
+      request(method, url, headers, body, onprogress) {
+        return new Promise((resolve, reject) => {
+          const xhr = new XMLHttpRequest();
+          this.xhr = xhr;
+          xhr.open(method, url);
+          for (const k in headers) xhr.setRequestHeader(k, headers[k]);
+          if (onprogress && xhr.upload) xhr.upload.onprogress = onprogress;
+          xhr.onload = () => { this.xhr = null; resolve(xhr); };
+          xhr.onerror = () => { this.xhr = null; reject(new Error('connection lost')); };
+          xhr.onabort = () => { this.xhr = null; reject(new Error('aborted')); };
+          xhr.send(body);
+        });
+      }
+
+      async create() {
+        const url = currentPath + encodeURIComponent(this.name);
+        const xhr = await this.request('POST', url,
+          { 'Upload-Complete': '?0', 'Upload-Length': String(this.size) }, new Blob([]));
+        if (xhr.status !== 201) throw new Error('create failed (' + xhr.status + ')');
+        const loc = xhr.getResponseHeader('Location');
+        if (!loc) throw new Error('no upload location');
+        return loc;
+      }
+
+      async syncOffset() {
+        const xhr = await this.request('HEAD', this.location, {}, null);
+        if (xhr.status === 404) throw new Error('upload expired');
+        const off = parseInt(xhr.getResponseHeader('Upload-Offset') || '', 10);
+        if (!isNaN(off)) { this.offset = off; this.loaded = off; }
+        if (xhr.getResponseHeader('Upload-Complete') === '?1') this.completed = true;
+      }
+
+      patch(end, isLast) {
+        const start = this.offset;
+        const blob = this.file.slice(start, end);
+        return this.request('PATCH', this.location,
+          { 'Content-Type': PARTIAL_TYPE, 'Upload-Offset': String(start),
+            'Upload-Complete': isLast ? '?1' : '?0' },
+          blob,
+          (e) => this.onProgress(start + e.loaded))
+          .then((xhr) => {
+            if (xhr.status === 204 || xhr.status === 201) {
+              this.offset = end; this.loaded = end;
+              if (xhr.status === 201) this.completed = true;
+            } else if (xhr.status === 409) {
+              const off = parseInt(xhr.getResponseHeader('Upload-Offset') || '', 10);
+              if (!isNaN(off)) { this.offset = off; this.loaded = off; }
+              if (xhr.getResponseHeader('Upload-Complete') === '?1') this.completed = true;
+            } else {
+              throw new Error('HTTP ' + xhr.status);
+            }
+          });
+      }
+
+      async run() {
+        try {
+          this.lastT = null; this.lastBytes = this.loaded; this.speed = 0;
+          this.status = this.location ? 'uploading' : 'starting'; this.render();
+          if (!this.location) this.location = await this.create();
+          else await this.syncOffset();
+          if (this.completed) { this.finish(); return; }
+          this.status = 'uploading';
+          while (this.offset < this.size && !this.canceled && !this.completed) {
+            const end = Math.min(this.offset + CHUNK, this.size);
+            await this.patch(end, end === this.size);
+          }
+          if (this.canceled) return;
+          if (!this.completed) await this.patch(this.offset, true);
+          this.finish();
+        } catch (err) {
+          if (this.canceled) return;
+          this.errMsg = (err && err.message) || 'failed';
+          this.speed = 0; this.status = 'error';
+          this.setClass(); this.render(); this.toRetry();
+        }
+      }
+
+      finish() {
+        this.completed = true; this.status = 'done'; this.speed = 0; this.loaded = this.size;
+        this.setClass(); this.render();
+        const c = this.el.querySelector('.u-cancel');
+        if (c) { c.title = 'Dismiss'; c.onclick = () => this.remove(); }
+        addOrUpdateFile(this.name, this.size);
+        setTimeout(() => this.remove(), DISMISS_MS);
+      }
+
+      toRetry() {
+        const c = this.el.querySelector('.u-cancel');
+        if (!c) return;
+        const r = document.createElement('button');
+        r.className = 'u-resume'; r.title = 'Retry'; r.textContent = 'retry';
+        r.addEventListener('click', () => this.retry());
+        c.replaceWith(r);
+      }
+
+      retry() {
+        const r = this.el.querySelector('.u-resume');
+        if (r) {
+          const c = document.createElement('button');
+          c.className = 'u-cancel'; c.title = 'Cancel'; c.textContent = '×';
+          c.addEventListener('click', () => this.cancel());
+          r.replaceWith(c);
+        }
+        this.el.classList.remove('error');
+        this.errMsg = null;
+        this.status = 'queued'; this.render();
+        enqueue(this);
+      }
+
+      cancel() {
+        if (this.completed || this.status === 'canceled' || this.status === 'error') { this.remove(); return; }
+        this.canceled = true; this.speed = 0;
+        if (this.xhr) this.xhr.abort();
+        const i = queue.indexOf(this); if (i >= 0) queue.splice(i, 1);
+        if (this.location) fetch(this.location, { method: 'DELETE' }).catch(() => {});
+        this.status = 'canceled'; this.setClass(); this.render();
+        const c = this.el.querySelector('.u-cancel');
+        if (c) c.onclick = () => this.remove();
+      }
+
+      remove() {
+        uploaders.delete(this);
+        if (this.el) {
+          this.el.classList.add('removing');
+          const el = this.el;
+          setTimeout(() => el.remove(), 250);
+        }
+        setTimeout(() => { renderHead(); renderStatus(); }, 260);
+      }
+    }
+
+    // ---- controls ----
+    const fileInput = document.getElementById('file-input');
+    const filepickLabel = document.getElementById('filepick-label');
+    const uploadBtn = document.getElementById('upload-btn');
+    function describeSelection(files) {
+      if (!files || files.length === 0) return 'Choose files...';
+      if (files.length === 1) return files[0].name;
+      const counts = {};
+      for (const f of files) {
+        const dot = f.name.lastIndexOf('.');
+        const ext = dot > 0 ? f.name.slice(dot + 1).toLowerCase() : 'file';
+        counts[ext] = (counts[ext] || 0) + 1;
+      }
+      return Object.keys(counts)
+        .sort(function(a, b) { return counts[b] - counts[a] || a.localeCompare(b); })
+        .map(function(ext) { return counts[ext] + ' ' + ext; })
+        .join(', ');
+    }
+    function setPickLabel(files) {
+      filepickLabel.textContent = describeSelection(files);
+    }
+    if (fileInput) {
+      fileInput.addEventListener('change', function() { setPickLabel(fileInput.files); });
+    }
+    if (uploadBtn) {
+      uploadBtn.addEventListener('click', function() {
+        if (!fileInput || fileInput.files.length === 0) return;
+        enqueueFiles(fileInput.files);
+        fileInput.value = ''; setPickLabel(null);
+      });
+    }
+
+    function uploadText(text) {
+      if (!text) return;
+      const name = 'paste-' + nowStamp().slice(0, 10) + '-' + String(Date.now()).slice(-6) + '.txt';
+      new Uploader(new File([text], name, { type: 'text/plain' }));
+      pump();
+    }
+    const pasteInput = document.getElementById('paste-input');
+    const pasteBtn = document.getElementById('paste-btn');
+    if (pasteBtn) {
+      pasteBtn.addEventListener('click', function() { uploadText(pasteInput.value); pasteInput.value = ''; });
+    }
+    document.addEventListener('paste', function(e) {
+      if (!fileInput) return;
+      const ae = document.activeElement;
+      if (ae && (ae.id === 'paste-input' || ae.id === 'search')) return;
+      const text = e.clipboardData && e.clipboardData.getData('text/plain');
+      if (text) uploadText(text);
+    });
+
+    // ---- drag & drop ----
+    const dragMsg = document.getElementById('drag-message');
+    document.addEventListener('dragover', function(e) {
+      e.preventDefault();
+      if (!fileInput) return;
+      dragMsg.textContent = 'Drop to upload';
+      dragMsg.classList.add('show');
+    });
+    document.addEventListener('dragleave', function(e) {
+      if (!e.relatedTarget) dragMsg.classList.remove('show');
+    });
+    document.addEventListener('drop', function(e) {
+      e.preventDefault();
+      dragMsg.classList.remove('show');
+      if (fileInput && e.dataTransfer.files.length > 0) enqueueFiles(e.dataTransfer.files);
+    });
+
+    // ---- theme toggle ----
+    const themeToggle = document.getElementById('theme-toggle');
+    if (themeToggle) {
+      themeToggle.addEventListener('click', function() {
+        const cur = document.documentElement.getAttribute('data-theme');
+        document.documentElement.setAttribute('data-theme', cur === 'light' ? 'dark' : 'light');
+      });
+    }
+  </script>
+</body>
+</html>
+{{define "icoFile"}}<svg width="14" height="16" viewBox="0 0 14 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 1.5h6L12.5 6v8.5a0 0 0 0 1 0 0h-11V1.5z" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M7.5 1.7V6h4.3" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{{end}}{{define "icoDir"}}<svg width="15" height="16" viewBox="0 0 15 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1 3.5h4.6l1.3 1.6H14v8.4H1z" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{{end}}

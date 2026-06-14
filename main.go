@@ -1,10 +1,12 @@
 package main
 
 import (
+	_ "embed"
 	"flag"
 	"fmt"
 	"html/template"
 	"io"
+	"io/fs"
 	"log"
 	"math"
 	"net/http"
@@ -14,12 +16,13 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
 const (
-	filesDir = "/files"
+	filesDir = "./files"
 )
 
 var (
@@ -33,6 +36,8 @@ type FileInfo struct {
 	LastModified string
 	IsDir        bool
 	URL          string
+	SizeBytes    int64 // raw size (recursive for dirs) for client-side sorting
+	ModUnix      int64 // mod time as unix seconds for client-side sorting
 }
 
 // Breadcrumb segment for the current path
@@ -59,6 +64,11 @@ var (
 	uploadsError        atomic.Uint64
 	directoryLists      atomic.Uint64
 	fileServes          atomic.Uint64
+	// Resumable upload metrics (draft-ietf-httpbis-resumable-upload-11)
+	resumableCreated   atomic.Uint64
+	resumableCompleted atomic.Uint64
+	resumableCanceled  atomic.Uint64
+	resumableAppends   atomic.Uint64
 
 	requestDurationBuckets = map[string]map[string]*atomic.Uint64{
 		"GET": {
@@ -73,14 +83,30 @@ var (
 			"1.0":  &atomic.Uint64{},
 			"+Inf": &atomic.Uint64{},
 		},
+		"POST": {
+			"0.1":  &atomic.Uint64{},
+			"0.5":  &atomic.Uint64{},
+			"1.0":  &atomic.Uint64{},
+			"+Inf": &atomic.Uint64{},
+		},
+		"PATCH": {
+			"0.1":  &atomic.Uint64{},
+			"0.5":  &atomic.Uint64{},
+			"1.0":  &atomic.Uint64{},
+			"+Inf": &atomic.Uint64{},
+		},
 	}
-	requestDurationSum   = map[string]*atomic.Uint64{
-		"GET": &atomic.Uint64{},
-		"PUT": &atomic.Uint64{},
+	requestDurationSum = map[string]*atomic.Uint64{
+		"GET":   &atomic.Uint64{},
+		"PUT":   &atomic.Uint64{},
+		"POST":  &atomic.Uint64{},
+		"PATCH": &atomic.Uint64{},
 	}
 	requestDurationCount = map[string]*atomic.Uint64{
-		"GET": &atomic.Uint64{},
-		"PUT": &atomic.Uint64{},
+		"GET":   &atomic.Uint64{},
+		"PUT":   &atomic.Uint64{},
+		"POST":  &atomic.Uint64{},
+		"PATCH": &atomic.Uint64{},
 	}
 )
 
@@ -122,6 +148,14 @@ func main() {
 
 	os.MkdirAll(filesDir, os.ModePerm)
 
+	if enableUpload {
+		// Resumable uploads keep in-memory state only, so partials from a
+		// previous run are useless: wipe them and start a janitor to expire
+		// abandoned uploads.
+		wipeUploadDir()
+		startUploadJanitor(registry, uploadMaxAge)
+	}
+
 	http.HandleFunc("/", pathHandler)
 	http.HandleFunc("/metrics", metricsHandler)
 
@@ -155,8 +189,27 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 		httpRequestsTotal.Add(1)
 	}
 
-	if r.Method == "PUT" {
+	// Resumable upload resources live under a reserved prefix and are handled
+	// before any file logic (spec: draft-ietf-httpbis-resumable-upload-11).
+	if strings.HasPrefix(r.URL.Path, uploadURLPrefix) {
+		handleUploadResource(w, r)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodOptions:
+		handleOptions(w, r)
+		return
+	case http.MethodPut:
 		handlePutUpload(w, r)
+		return
+	case http.MethodPost:
+		// POST is only meaningful as a resumable upload creation request.
+		if hasUploadCreation(r) {
+			handleUploadCreation(w, r)
+		} else {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		}
 		return
 	}
 
@@ -237,21 +290,19 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 
 		entryURL := entry.Name()
 		var size string
+		var sizeBytes int64
 		if entry.IsDir() {
 			entryURL += "/"
 			subDirPath := filepath.Join(dirPath, entry.Name())
-			if subEntries, err := os.ReadDir(subDirPath); err == nil {
-				itemCount := len(subEntries)
-				if itemCount == 1 {
-					size = "1 item"
-				} else {
-					size = fmt.Sprintf("%d items", itemCount)
-				}
-			} else {
-				size = "-"
+			bytes, complete := cachedDirSize(subDirPath, info.ModTime())
+			sizeBytes = bytes
+			size = formatSize(bytes)
+			if !complete {
+				size = "~" + size // partial scan (timed out): lower-bound estimate
 			}
 		} else {
-			size = formatSize(info.Size())
+			sizeBytes = info.Size()
+			size = formatSize(sizeBytes)
 		}
 
 		fileInfos = append(fileInfos, FileInfo{
@@ -260,6 +311,8 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 			LastModified: info.ModTime().Format("2006-01-02 15:04-07:00"),
 			IsDir:        entry.IsDir(),
 			URL:          entryURL,
+			SizeBytes:    sizeBytes,
+			ModUnix:      info.ModTime().Unix(),
 		})
 	}
 
@@ -313,6 +366,14 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 }
 
 func handlePutUpload(w http.ResponseWriter, r *http.Request) {
+	// A PUT carrying an Upload-Complete header is a resumable upload creation
+	// request (transparent upgrade, spec §12.1.1). A plain PUT keeps the
+	// original single-shot behavior below for full backward compatibility.
+	if hasUploadCreation(r) {
+		handleUploadCreation(w, r)
+		return
+	}
+
 	uploadsTotal.Add(1)
 
 	if !enableUpload {
@@ -368,6 +429,8 @@ func handlePutUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error saving file", http.StatusInternalServerError)
 		return
 	}
+
+	invalidateDirSizes(fullPath)
 
 	uploadsSuccess.Add(1)
 	httpRequestsSuccess.Add(1)
@@ -432,6 +495,14 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "filebrowser_uploads_total{status=\"error\"} %d\n", uploadsError.Load())
 	fmt.Fprintf(w, "\n")
 
+	fmt.Fprintf(w, "# HELP filebrowser_resumable_uploads_total Resumable upload activity\n")
+	fmt.Fprintf(w, "# TYPE filebrowser_resumable_uploads_total counter\n")
+	fmt.Fprintf(w, "filebrowser_resumable_uploads_total{event=\"created\"} %d\n", resumableCreated.Load())
+	fmt.Fprintf(w, "filebrowser_resumable_uploads_total{event=\"completed\"} %d\n", resumableCompleted.Load())
+	fmt.Fprintf(w, "filebrowser_resumable_uploads_total{event=\"canceled\"} %d\n", resumableCanceled.Load())
+	fmt.Fprintf(w, "filebrowser_resumable_uploads_total{event=\"append\"} %d\n", resumableAppends.Load())
+	fmt.Fprintf(w, "\n")
+
 	fmt.Fprintf(w, "# HELP filebrowser_operations_total Total number of file operations\n")
 	fmt.Fprintf(w, "# TYPE filebrowser_operations_total counter\n")
 	fmt.Fprintf(w, "filebrowser_operations_total{type=\"directory_list\"} %d\n", directoryLists.Load())
@@ -480,6 +551,98 @@ func metricsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ---- Directory size estimation (cached) ----
+
+const dirScanBudget = 100 * time.Millisecond // per-directory walk time budget
+
+type dirSizeEntry struct {
+	bytes    int64
+	complete bool
+	mtime    time.Time
+}
+
+// dirSizeCache maps a directory path to its last computed recursive size.
+var dirSizeCache sync.Map
+
+// cachedDirSize returns the (approximate) recursive byte size of a directory,
+// caching the result. A cached entry is reused until either the directory's
+// own mtime changes (an out-of-band add/remove of a direct child) or an upload
+// explicitly clears it via invalidateDirSizes. There is no time-based expiry:
+// this app is the only writer that changes nested totals, and it invalidates
+// the affected directories itself.
+func cachedDirSize(path string, mtime time.Time) (int64, bool) {
+	if v, ok := dirSizeCache.Load(path); ok {
+		e := v.(dirSizeEntry)
+		if e.mtime.Equal(mtime) {
+			return e.bytes, e.complete
+		}
+	}
+	bytes, complete, _ := ApproxDirSize(path, dirScanBudget)
+	dirSizeCache.Store(path, dirSizeEntry{bytes: bytes, complete: complete, mtime: mtime})
+	return bytes, complete
+}
+
+// invalidateDirSizes drops the cached size for the directory containing
+// fullPath and every ancestor up to (and including) filesDir. An upload
+// increases the recursive total of every directory above it, and overwriting
+// an existing file changes those totals without changing any directory's
+// mtime, so the cache must be cleared explicitly whenever a file is written.
+func invalidateDirSizes(fullPath string) {
+	absFiles, err := filepath.Abs(filesDir)
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(fullPath)
+	for {
+		dirSizeCache.Delete(dir)
+		absDir, err := filepath.Abs(dir)
+		if err != nil || absDir == absFiles {
+			return
+		}
+		if !strings.HasPrefix(absDir, absFiles+string(os.PathSeparator)) {
+			return
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return
+		}
+		dir = parent
+	}
+}
+
+// ApproxDirSize sums the sizes of all files under path, giving up after
+// maxDuration so a huge tree can't stall a page render. complete is false when
+// the walk was cut short, in which case bytes is a lower-bound estimate.
+//
+// Note: filepath.WalkDir turns a SkipAll return into a nil error, so the
+// timeout is tracked with an explicit flag rather than inferred from err.
+func ApproxDirSize(path string, maxDuration time.Duration) (bytes int64, complete bool, err error) {
+	deadline := time.Now().Add(maxDuration)
+	timedOut := false
+
+	err = filepath.WalkDir(path, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil // ignore unreadable files for UI estimates
+		}
+		if time.Now().After(deadline) {
+			timedOut = true
+			return filepath.SkipAll
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		bytes += info.Size()
+		return nil
+	})
+
+	complete = err == nil && !timedOut
+	return bytes, complete, err
+}
+
 func formatSize(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -524,384 +687,5 @@ func buildBreadcrumbs(urlPath string) []Crumb {
 	return crumbs
 }
 
-const htmlTemplate = `<!DOCTYPE html>
-<html>
-<head>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{{.Title}}</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>📁</text></svg>">
-{{.ExtraHeaders | safeHTML}}
-<style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-
-  :root {
-    --bg-color: #fff;
-    --text-color: #000;
-    --header-bg: #f0f0f0;
-    --border-color: #ddd;
-    --border-light: #eee;
-    --row-even: #f8f8f8;
-    --footer-bg: #f0f0f0;
-    --footer-text: #666;
-    --footer-height: 30px;
-    --table-margin: 10px;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg-color: #1a1a1a;
-      --text-color: #e0e0e0;
-      --header-bg: #2a2a2a;
-      --border-color: #444;
-      --border-light: #333;
-      --row-even: #252525;
-      --footer-bg: #2a2a2a;
-      --footer-text: #888;
-    }
-  }
-
-  [data-theme="dark"] {
-    --bg-color: #1a1a1a;
-    --text-color: #e0e0e0;
-    --header-bg: #2a2a2a;
-    --border-color: #444;
-    --border-light: #333;
-    --row-even: #252525;
-    --footer-bg: #2a2a2a;
-    --footer-text: #888;
-  }
-
-  [data-theme="light"] {
-    --bg-color: #fff;
-    --text-color: #000;
-    --header-bg: #f0f0f0;
-    --border-color: #ddd;
-    --border-light: #eee;
-    --row-even: #f8f8f8;
-    --footer-bg: #f0f0f0;
-    --footer-text: #666;
-  }
-
-  body {
-    font-family: monospace;
-    font-size: 14px;
-    background: var(--bg-color);
-    color: var(--text-color);
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-  }
-  header {
-    background: var(--header-bg);
-    padding: 10px;
-    border-bottom: 1px solid var(--border-color);
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    flex-shrink: 0;
-  }
-  main {
-    flex: 1;
-    overflow: auto;
-    padding-bottom: var(--footer-height);
-  }
-  table {
-    width: calc(100% - calc(2 * var(--table-margin)));
-    border-collapse: collapse;
-    margin: var(--table-margin);
-  }
-  th {
-    text-align: left;
-    padding: 8px 4px;
-    border-bottom: 1px solid var(--border-color);
-    position: sticky;
-    top: 0;
-    background: var(--bg-color);
-    z-index: 10;
-  }
-  td {
-    padding: 8px 4px;
-    border-bottom: 1px solid var(--border-light);
-    white-space: nowrap;
-  }
-  tr:nth-child(even) { background: var(--row-even); }
-  .name { width: 60%; overflow: hidden; text-overflow: ellipsis; }
-  .size { width: 15%; }
-  .date { width: 25%; }
-  .upload-form { display: flex; align-items: center; gap: 5px; }
-  .search-box {
-    padding: 4px;
-    width: 100%;
-    font-family: monospace;
-    background: var(--bg-color);
-    color: var(--text-color);
-    border: 1px solid var(--border-color);
-  }
-  input[type="file"] {
-    display: none;
-  }
-  .file-input-label {
-    flex-grow: 1;
-    padding: 4px 8px;
-    background: var(--header-bg);
-    color: var(--text-color);
-    border: 1px solid var(--border-color);
-    cursor: pointer;
-    font-family: monospace;
-    font-size: 14px;
-    text-align: left;
-    overflow: hidden;
-    white-space: nowrap;
-    text-overflow: ellipsis;
-  }
-  .file-input-label:hover { opacity: 0.8; }
-  .paste-form textarea {
-    flex-grow: 1;
-    padding: 4px 8px;
-    font-family: monospace;
-    font-size: 14px;
-    background: var(--header-bg);
-    color: var(--text-color);
-    border: 1px solid var(--border-color);
-    resize: vertical;
-    min-height: 1.5em;
-  }
-  .file-input-label:disabled,
-  .file-input-label.disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .file-input-label.disabled::after {
-    content: " 🚫";
-    color: #999;
-  }
-  .drag-disabled {
-    position: fixed;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-    background: var(--header-bg);
-    border: 2px solid var(--border-color);
-    padding: 10px 20px;
-    border-radius: 4px;
-    font-size: 16px;
-    z-index: 1000;
-    display: none;
-  }
-  button {
-    padding: 4px 8px;
-    background: var(--header-bg);
-    color: var(--text-color);
-    border: 1px solid var(--border-color);
-    cursor: pointer;
-  }
-  button:hover { opacity: 0.8; }
-  button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  a { color: var(--text-color); }
-  header h1 a { text-decoration: none; }
-  header h1 a:hover { text-decoration: underline; }
-  footer {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    background: var(--footer-bg);
-    padding: 5px 40px 5px 10px;
-    border-top: 1px solid var(--border-color);
-    font-size: 11px;
-    color: var(--footer-text);
-  }
-  .theme-toggle {
-    position: absolute;
-    right: 5px;
-    top: 50%;
-    transform: translateY(-50%);
-    padding: 4px 8px;
-    background: var(--header-bg);
-    border: 1px solid var(--border-color);
-    color: var(--text-color);
-    cursor: pointer;
-    font-size: 11px;
-    margin: 0;
-  }
-  .theme-toggle:hover { opacity: 0.8; }
-</style>
-</head>
-<body>
-  <header>
-    <h1>{{range .Breadcrumbs}}<a href="{{.URL}}">{{.Label}}</a>{{end}}</h1>
-    <input type="text" id="search" class="search-box" placeholder="Filter by filename..." autocomplete="off">
-    <div class="upload-form">
-      <input type="file" id="file-input" {{if .DisableUpload}}disabled{{end}}>
-      <label for="file-input" class="file-input-label{{if .DisableUpload}} disabled{{end}}" id="file-label">
-        {{if .DisableUpload}}Uploads disabled{{else}}Choose file...{{end}}
-      </label>
-      <button id="upload-btn" {{if .DisableUpload}}disabled{{end}}>Upload</button>
-    </div>
-    {{if not .DisableUpload}}
-    <div class="upload-form paste-form">
-      <textarea id="paste-input" placeholder="Paste or type text here..." rows="1"></textarea>
-      <button id="paste-btn">Upload text</button>
-    </div>
-    {{end}}
-  </header>
-
-  <main>
-    <table id="file-table">
-      <thead>
-        <tr>
-          <th class="name">Name</th>
-          <th class="size">Size</th>
-          <th class="date">Last Modified</th>
-        </tr>
-      </thead>
-      <tbody>
-        {{if ne .CurrentPath "/"}}
-        <tr class="filerow">
-          <td class="name">📁 <a href="{{.ParentURL}}">..</a></td>
-          <td class="size">-</td>
-          <td class="date">-</td>
-        </tr>
-        {{end}}
-        {{range .Files}}
-        <tr class="filerow">
-          <td class="name">
-            {{if .IsDir}}📁{{else}}📄{{end}}
-            <a href="{{.URL}}">{{.Name}}{{if .IsDir}}/{{end}}</a>
-          </td>
-          <td class="size">{{.Size}}</td>
-          <td class="date">{{.LastModified}}</td>
-        </tr>
-        {{end}}
-      </tbody>
-    </table>
-  </main>
-
-  <footer>
-    Build: {{.GitCommit}} | {{.BuildDate}}
-    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle theme">🌓</button>
-  </footer>
-
-  <div id="drag-message" class="drag-disabled"></div>
-
-  <script>
-    function toggleTheme() {
-      const html = document.documentElement;
-      const current = html.getAttribute('data-theme');
-      const next = current === 'dark' ? 'light' : 'dark';
-      html.setAttribute('data-theme', next);
-    }
-
-    const fileInput = document.getElementById('file-input');
-    const uploadBtn = document.getElementById('upload-btn');
-    const dragMessage = document.getElementById('drag-message');
-    const currentPath = '{{.CurrentPath}}';
-
-    async function uploadFile(file) {
-      const uploadPath = currentPath + file.name;
-
-      try {
-        const response = await fetch(uploadPath, {
-          method: 'PUT',
-          body: file
-        });
-
-        if (response.ok) {
-          window.location.reload();
-        } else {
-          const error = await response.text();
-          alert('Upload failed: ' + error);
-        }
-      } catch (error) {
-        alert('Upload failed: ' + error.message);
-      }
-    }
-
-    fileInput.addEventListener('change', function(e) {
-      const label = document.getElementById('file-label');
-      if (e.target.disabled) return;
-      const fileName = e.target.files[0]?.name || 'Choose file...';
-      label.textContent = fileName;
-    });
-
-    uploadBtn.addEventListener('click', function() {
-      if (fileInput.disabled || !fileInput.files[0]) return;
-      uploadFile(fileInput.files[0]);
-    });
-
-    document.getElementById('search').addEventListener('input', function(e) {
-      const term = e.target.value.toLowerCase();
-      const rows = document.querySelectorAll('.filerow');
-
-      rows.forEach(row => {
-        const link = row.querySelector('.name a');
-        if (!link) return;
-
-        const name = link.textContent.toLowerCase();
-        if (link.textContent === '..') return;
-        row.style.display = name.includes(term) ? '' : 'none';
-      });
-    });
-
-    // Drag and drop functionality
-    function showDragMessage(text) {
-      dragMessage.className = 'drag-disabled';
-      dragMessage.textContent = text;
-      dragMessage.style.display = 'block';
-    }
-
-    function hideDragMessage() {
-      dragMessage.style.display = 'none';
-    }
-
-    document.addEventListener('dragover', function(e) {
-      e.preventDefault();
-      const text = fileInput.disabled ? '🚫 Uploads disabled' : '📁 Drop to upload';
-      showDragMessage(text);
-    });
-
-    document.addEventListener('dragleave', function(e) {
-      if (!e.relatedTarget) hideDragMessage();
-    });
-
-    document.addEventListener('drop', function(e) {
-      e.preventDefault();
-      hideDragMessage();
-      if (!fileInput.disabled && e.dataTransfer.files.length > 0) {
-        const file = e.dataTransfer.files[0];
-        uploadFile(file);
-      }
-    });
-
-    function generatePasteName() {
-      const now = new Date();
-      const pad = (n) => String(n).padStart(2, '0');
-      return 'paste-' + now.getFullYear() + '-' + pad(now.getMonth()+1) + '-' + pad(now.getDate()) + '-' + pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()) + '.txt';
-    }
-
-    function uploadText(text) {
-      if (!text) return;
-      const file = new File([text], generatePasteName(), { type: 'text/plain' });
-      uploadFile(file);
-    }
-
-    document.addEventListener('paste', function(e) {
-      if (fileInput.disabled) return;
-      if (document.activeElement?.id === 'paste-input') return;
-      const text = e.clipboardData?.getData('text/plain');
-      uploadText(text);
-    });
-
-    const pasteBtn = document.getElementById('paste-btn');
-    if (pasteBtn) {
-      pasteBtn.addEventListener('click', function() {
-        const textarea = document.getElementById('paste-input');
-        uploadText(textarea.value);
-      });
-    }
-  </script>
-</body>
-</html>`
+//go:embed template.html
+var htmlTemplate string
