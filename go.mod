@@ -1,3 +1,3 @@
-module filebrowser
+module github.com/valonsodev/filebrowser
 
-go 1.26.3
+go 1.26
