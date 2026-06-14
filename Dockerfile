@@ -8,7 +8,7 @@ COPY . .
 # Get git commit hash and build date
 RUN GIT_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown") && \
     BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) && \
-    CGO_ENABLED=0 go build -ldflags "-X main.GitCommit=${GIT_COMMIT} -X main.BuildDate=${BUILD_DATE}" -o filebrowser main.go
+    CGO_ENABLED=0 go build -ldflags "-X main.GitCommit=${GIT_COMMIT} -X main.BuildDate=${BUILD_DATE}" -o filebrowser .
 
 FROM scratch
 COPY --from=builder /src/filebrowser /filebrowser
