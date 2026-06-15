@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -138,9 +139,29 @@ func (u *upload) location() string {
 // wipeUploadDir removes any partial uploads left over from a previous run.
 // In-memory state does not survive a restart, so the orphaned data is useless
 // and the draft requires the server to consider such uploads gone.
+//
+// It clears the directory's contents but does NOT remove the directory itself:
+// in restricted deployments (e.g. running as a non-root user whose parent
+// directory is not writable) the process can write inside an existing uploads
+// dir but cannot recreate it. It then verifies the dir is actually writable so
+// a misconfigured mount fails at boot rather than silently breaking every
+// upload (which previously surfaced as a request that hangs forever).
 func wipeUploadDir() {
-	os.RemoveAll(uploadsDir)
-	os.MkdirAll(uploadsDir, os.ModePerm)
+	if err := os.MkdirAll(uploadsDir, os.ModePerm); err != nil {
+		log.Fatalf("uploads directory %q is not usable: %v", uploadsDir, err)
+	}
+	entries, err := os.ReadDir(uploadsDir)
+	if err != nil {
+		log.Fatalf("cannot read uploads directory %q: %v", uploadsDir, err)
+	}
+	for _, e := range entries {
+		os.RemoveAll(filepath.Join(uploadsDir, e.Name()))
+	}
+	probe := filepath.Join(uploadsDir, ".write-probe")
+	if err := os.WriteFile(probe, nil, 0o644); err != nil {
+		log.Fatalf("uploads directory %q is not writable: %v", uploadsDir, err)
+	}
+	os.Remove(probe)
 }
 
 // startUploadJanitor periodically reclaims upload resources (including
@@ -265,9 +286,22 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 
-	n, copyErr := writePartialAt(u, 0, r.Body)
+	n, serverErr, copyErr := writePartialAt(u, 0, r.Body)
 	u.offset = n
 	u.updatedAt = time.Now()
+
+	// Surface a server-side storage failure immediately rather than returning a
+	// 201 that hides it (the upload would then fail on the first PATCH and the
+	// browser would hang). Drain the body so the request completes cleanly.
+	if serverErr != nil {
+		io.Copy(io.Discard, r.Body)
+		os.Remove(u.partialPath())
+		registry.remove(u.id)
+		u.deleted = true
+		uploadsError.Add(1)
+		writeProblem(w, http.StatusInternalServerError, "", "unable to store upload data")
+		return
+	}
 
 	if u.lengthKnown && u.offset > u.length {
 		os.Remove(u.partialPath())
@@ -413,9 +447,20 @@ func appendToUpload(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	n, copyErr := writePartialAt(u, u.offset, r.Body)
+	n, serverErr, copyErr := writePartialAt(u, u.offset, r.Body)
 	u.offset += n
 	u.updatedAt = time.Now()
+
+	// A server-side I/O error (e.g. the uploads dir is missing or not writable)
+	// is not something the client can resume from. Drain the rest of the body
+	// so the request completes instead of leaving the browser hung on a
+	// half-read upload, then report a hard failure.
+	if serverErr != nil {
+		io.Copy(io.Discard, r.Body)
+		uploadsError.Add(1)
+		writeProblem(w, http.StatusInternalServerError, "", "unable to store upload data")
+		return
+	}
 
 	if u.lengthKnown && u.offset > u.length {
 		os.Remove(u.partialPath())
@@ -519,21 +564,29 @@ func resolveTarget(w http.ResponseWriter, urlPath string) (string, string, bool)
 // writePartialAt writes src into the upload's partial file starting at off and
 // returns the number of bytes written. A short/interrupted read still returns
 // the bytes that were durably written so the offset can advance.
-func writePartialAt(u *upload, off int64, src io.Reader) (int64, error) {
+//
+// It distinguishes two failure classes. serverErr is an I/O error owned by the
+// server (the partial file cannot be opened, sought, or synced) — typically a
+// missing or non-writable uploads dir; this is fatal for the upload and must
+// not be presented to the client as a resumable interruption. clientErr is a
+// read error from src (the transfer was interrupted) and is recoverable: the
+// durably written bytes still count and the client can resume.
+func writePartialAt(u *upload, off int64, src io.Reader) (n int64, serverErr, clientErr error) {
 	f, err := os.OpenFile(u.partialPath(), os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
-		return 0, err
+		return 0, err, nil
 	}
 	defer f.Close()
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
-		return 0, err
+		return 0, err, nil
 	}
-	n, copyErr := io.Copy(f, src)
-	syncErr := f.Sync()
-	if copyErr != nil {
-		return n, copyErr
+	n, clientErr = io.Copy(f, src)
+	if err := f.Sync(); err != nil {
+		// A sync failure means the bytes are not durable: treat it as a server
+		// error so we do not advance the offset over data that may be lost.
+		return n, err, nil
 	}
-	return n, syncErr
+	return n, nil, clientErr
 }
 
 // finalizeUpload marks the upload complete and moves the assembled partial file
