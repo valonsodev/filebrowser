@@ -37,7 +37,7 @@ services:
 
 # file actions
 
-With `--enable-upload` or `ENABLE_UPLOAD=true`, **Delete** removes a file after confirmation.
+With `--enable-upload` or `ENABLE_UPLOAD=true`, **Delete** removes a file immediately.
 
 Turn on **Temporary uploads (5 min)** before uploading to have new uploads deleted automatically five minutes after each upload completes. It applies to file selection, pasted text, and drag-and-drop uploads. Turning it off makes subsequent uploads permanent; queued or in-progress uploads keep the setting they started with. File rows show a countdown beside Delete without wrapping actions onto another line.
 

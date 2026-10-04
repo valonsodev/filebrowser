@@ -577,7 +577,6 @@
       if (!button) return;
       const tr = button.closest('tr');
       const name = tr.dataset.name;
-      if (!window.confirm('Delete "' + name + '"? This cannot be undone.')) return;
       button.disabled = true;
       actionStatus.textContent = '';
       try {
