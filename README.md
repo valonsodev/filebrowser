@@ -8,7 +8,7 @@ services:
       - 7667:8000
     volumes:
       - /data/bin:/files
-    command: --enable-upload
+    command: --enable-upload --address 0.0.0.0
     environment:
       - TITLE="File Server"
       - EXTRA_HEADERS=""
@@ -34,3 +34,26 @@ services:
 - `filebrowser_goroutines` - Goroutines
 - `filebrowser_gc_total` - GC count
 - `filebrowser_config{setting}` - Config
+
+# file actions
+
+With `--enable-upload` or `ENABLE_UPLOAD=true`, each file has two browser actions:
+
+- **Delete** removes the file immediately after confirmation.
+- **Temporary (5 min)** schedules deletion five minutes from clicking the button. A countdown shows the remaining time; **Keep file** cancels deletion.
+
+Deletion runs on the server even when the browser is closed. Expiry times are stored in the reserved `.filebrowser` directory on the files volume and survive restarts; overdue files are removed at startup. Overwriting a file through an upload clears its previous expiry. These actions apply to regular files, not folders.
+
+API clients can use `DELETE /path/to/file` to delete a file, `PATCH /path/to/file?temporary=true` to schedule expiry, or `PATCH /path/to/file?temporary=false` to cancel it. File mutations share the upload setting and its existing access model.
+
+Use the **Folder name** row and **Create folder** button to create a folder in the current directory. Enter submits the name; errors appear below the row. The new folder appears in the list without navigating away. Folder creation requires uploads to be enabled. API clients can use `POST /path/to/new-folder/?folder=true`; the parent directory must exist, and existing files or folders are never overwritten.
+
+# downloads
+
+File responses include a `Content-Disposition` filename. Use `curl -OJ` to save a download using the filename supplied by the server, including spaces and Unicode characters:
+
+```sh
+curl -OJ 'http://localhost:8000/my%20file.txt'
+```
+
+Files are served as attachments with `X-Content-Type-Options: nosniff` so uploaded HTML downloads instead of opening as a page on the browser's origin. Browser requests that change files must come from the same origin; command-line clients can continue to use the API without browser headers. Symlinks in the files tree are not accessible through file URLs, including aliases to the private expiry directory. Uploads are staged and installed atomically, so interrupted transfers leave the existing file intact.

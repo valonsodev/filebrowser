@@ -81,6 +81,9 @@
   .row-controls { display: flex; gap: 8px; margin-bottom: 8px; }
   .row-controls.paste-row { align-items: flex-start; }
   .row-controls .grow { flex: 1; min-width: 0; }
+  #folder-status { color: var(--muted); margin-bottom: 8px; font-size: 12px; }
+  #folder-status:empty { display: none; }
+  #folder-name[aria-invalid="true"] { border-color: #e66; }
   .btn {
     background: var(--field);
     color: var(--fg);
@@ -234,6 +237,17 @@
   :root[data-theme="light"] td.c-name a { text-decoration-color: rgba(0,0,0,0.35); }
   td.c-name a:hover { color: var(--fg-strong); text-decoration-color: var(--fg-strong); }
   td.c-size, td.c-date { color: var(--muted); white-space: nowrap; }
+  .c-actions { width: 230px; }
+  .file-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .file-actions .btn { padding: 4px 8px; font-size: 12px; }
+  .file-actions .delete-file { color: #e66; }
+  .expiry { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+  #file-action-status { padding: 8px 16px; color: var(--muted); }
+  #file-action-status:empty { display: none; }
+  @media (max-width: 640px) {
+    .c-actions { width: 135px; }
+    td.c-actions { padding: 8px; }
+  }
   tr.new-row td.c-name a { color: var(--fg-strong); }
   tr.flash { animation: flash 1.4s ease; }
   @keyframes flash { 0% { background: rgba(255,255,255,0.14); } 100% { background: transparent; } }
@@ -306,10 +320,17 @@
       <textarea class="field grow" id="paste-input" rows="1" placeholder="Paste or type text here..." autocomplete="off" spellcheck="false"></textarea>
       <button class="btn" id="paste-btn">Upload text</button>
     </div>
+    <form class="row-controls" id="folder-form" novalidate>
+      <input class="field grow" id="folder-name" type="text" placeholder="Folder name..." aria-label="Folder name" aria-describedby="folder-status" autocomplete="off" spellcheck="false">
+      <button class="btn" id="folder-btn" type="submit">Create folder</button>
+    </form>
+    <div id="folder-status" role="status" aria-live="polite"></div>
     {{end}}
   </div>
 
   <div id="uploads" aria-live="polite"></div>
+
+  <div id="file-action-status" role="status" aria-live="polite"></div>
 
   <table>
     <thead>
@@ -317,6 +338,7 @@
         <th class="c-name sortable" data-key="name">Name</th>
         <th class="c-size sortable" data-key="size">Size</th>
         <th class="c-date sortable" data-key="mtime">Last Modified</th>
+        {{if not .DisableUpload}}<th class="c-actions">Actions</th>{{end}}
       </tr>
     </thead>
     <tbody id="filelist">
@@ -325,13 +347,20 @@
         <td class="c-name"><span class="ico">{{template "icoDir"}}</span><a href="{{.ParentURL}}">..</a></td>
         <td class="c-size">-</td>
         <td class="c-date">-</td>
+        {{if not .DisableUpload}}<td class="c-actions"></td>{{end}}
       </tr>
       {{end}}
       {{range .Files}}
-      <tr class="filerow"{{if .IsDir}} data-dir="1"{{end}} data-name="{{.Name}}" data-size="{{.SizeBytes}}" data-mtime="{{.ModUnix}}">
+      <tr class="filerow"{{if .IsDir}} data-dir="1"{{end}} data-name="{{.Name}}" data-size="{{.SizeBytes}}" data-mtime="{{.ModUnix}}" data-expires="{{.ExpiresUnix}}">
         <td class="c-name"><span class="ico">{{if .IsDir}}{{template "icoDir"}}{{else}}{{template "icoFile"}}{{end}}</span><a href="{{.URL}}">{{.Name}}{{if .IsDir}}/{{end}}</a></td>
         <td class="c-size">{{.Size}}</td>
         <td class="c-date">{{.LastModified}}</td>
+        {{if not $.DisableUpload}}<td class="c-actions">
+          {{if not .IsDir}}<div class="file-actions">
+            <button class="btn temporary-file" type="button">{{if .ExpiresUnix}}Keep file{{else}}Temporary (5 min){{end}}</button>
+            <button class="btn delete-file" type="button">Delete</button>
+          </div><span class="expiry"></span>{{end}}
+        </td>{{end}}
       </tr>
       {{end}}
     </tbody>
@@ -352,6 +381,7 @@
 
   <script>
     const currentPath = '{{.CurrentPath}}';
+    const canChangeFiles = {{not .DisableUpload}};
     const fileIco = document.getElementById('ico-file').innerHTML;
 
     function fmtBytes(b) {
@@ -391,9 +421,11 @@
       if (key === 'mtime') return parseFloat(tr.dataset.mtime || '0');
       return (tr.dataset.name || '').toLowerCase();
     }
-    function applySort(key) {
-      if (sortKey === key) sortDir = -sortDir;
-      else { sortKey = key; sortDir = key === 'name' ? 1 : -1; } // names asc, size/date desc
+    function applySort(key, keepDirection) {
+      if (!keepDirection) {
+        if (sortKey === key) sortDir = -sortDir;
+        else { sortKey = key; sortDir = key === 'name' ? 1 : -1; } // names asc, size/date desc
+      }
       const rows = Array.prototype.slice.call(tbody.querySelectorAll('tr.filerow:not(.parent)'));
       rows.sort(function(a, b) {
         if (sortKey === 'name') {
@@ -431,11 +463,16 @@
       tr.dataset.mtime = String(mtime);
       const c1 = document.createElement('td'); c1.className = 'c-name';
       const ico = document.createElement('span'); ico.className = 'ico'; ico.innerHTML = fileIco;
-      const a = document.createElement('a'); a.href = name; a.textContent = name;
+      const a = document.createElement('a'); a.href = encodeURIComponent(name); a.textContent = name;
       c1.append(ico, a);
       const c2 = document.createElement('td'); c2.className = 'c-size'; c2.textContent = fmtBytes(size);
       const c3 = document.createElement('td'); c3.className = 'c-date'; c3.textContent = dateStr;
       tr.append(c1, c2, c3);
+      if (canChangeFiles) {
+        const actions = document.createElement('td'); actions.className = 'c-actions';
+        actions.innerHTML = '<div class="file-actions"><button class="btn temporary-file" type="button">Temporary (5 min)</button><button class="btn delete-file" type="button">Delete</button></div><span class="expiry"></span>';
+        tr.appendChild(actions);
+      }
       return tr;
     }
     function addOrUpdateFile(name, size) {
@@ -448,6 +485,8 @@
       }
       if (tr) {
         tr.dataset.size = String(size); tr.dataset.mtime = String(mtime);
+        tr.dataset.expires = '0';
+        updateExpiry(tr);
         const cs = tr.querySelector('.c-size'); if (cs) cs.textContent = fmtBytes(size);
         const cd = tr.querySelector('.c-date'); if (cd) cd.textContent = dateStr;
         tr.classList.add('flash');
@@ -459,6 +498,121 @@
         setTimeout(function() { tr.classList.remove('flash', 'new-row'); }, 1500);
       }
     }
+
+    // ---- file deletion and temporary files ----
+    const actionStatus = document.getElementById('file-action-status');
+    const folderForm = document.getElementById('folder-form');
+    if (folderForm) {
+      const folderName = document.getElementById('folder-name');
+      const folderButton = document.getElementById('folder-btn');
+      const folderStatus = document.getElementById('folder-status');
+      folderName.addEventListener('input', function() {
+        folderName.removeAttribute('aria-invalid');
+        folderStatus.textContent = '';
+      });
+      folderForm.addEventListener('submit', async function(event) {
+        event.preventDefault();
+        if (folderButton.disabled) return;
+        const name = folderName.value.trim();
+        const reserved = name === '.filebrowser' || name === '.uploads';
+        if (!name || name === '.' || name === '..' || /[\/\\]/.test(name) || reserved) {
+          folderName.setAttribute('aria-invalid', 'true');
+          folderStatus.textContent = reserved ? 'That folder name is reserved. Choose another name.' : 'Enter a folder name without slashes; . and .. are not valid names.';
+          folderName.focus();
+          return;
+        }
+        folderButton.disabled = true;
+        folderName.disabled = true;
+        folderStatus.textContent = 'Creating folder…';
+        try {
+          const target = new URL(encodeURIComponent(name) + '/', window.location.href);
+          target.search = '?folder=true';
+          const response = await fetch(target, { method: 'POST' });
+          if (!response.ok) throw new Error((await response.text()).trim());
+          const tr = makeRow(name, 0, nowStamp(), Math.floor(Date.now() / 1000));
+          tr.dataset.dir = '1';
+          const link = tr.querySelector('.c-name a');
+          link.href = target.pathname;
+          link.textContent = name + '/';
+          tr.querySelector('.ico').innerHTML = document.getElementById('ico-dir').innerHTML;
+          tr.querySelector('.c-actions').replaceChildren();
+          const parent = tbody.querySelector('tr.parent');
+          if (parent) parent.after(tr); else tbody.prepend(tr);
+          if (sortKey) applySort(sortKey, true);
+          search.dispatchEvent(new Event('input'));
+          setTimeout(function() { tr.classList.remove('flash', 'new-row'); }, 1500);
+          folderName.value = '';
+          folderStatus.textContent = 'Created "' + name + '".';
+        } catch (error) {
+          folderName.setAttribute('aria-invalid', 'true');
+          folderStatus.textContent = error.message || 'Unable to create folder.';
+        } finally {
+          folderButton.disabled = false;
+          folderName.disabled = false;
+          folderName.focus();
+        }
+      });
+    }
+    function updateExpiry(tr) {
+      const expires = Number(tr.dataset.expires || 0);
+      const label = tr.querySelector('.expiry');
+      const button = tr.querySelector('.temporary-file');
+      if (button) button.textContent = expires ? 'Keep file' : 'Temporary (5 min)';
+      if (!label) return;
+      if (!expires) { label.textContent = ''; return; }
+      const remaining = Math.max(0, expires - Math.floor(Date.now() / 1000));
+      label.textContent = remaining ? 'Deletes in ' + Math.floor(remaining / 60) + ':' + String(remaining % 60).padStart(2, '0') : 'Deleting…';
+      label.title = 'Scheduled deletion: ' + new Date(expires * 1000).toLocaleString();
+    }
+    tbody.addEventListener('click', async function(event) {
+      const button = event.target.closest('.delete-file, .temporary-file');
+      if (!button) return;
+      const tr = button.closest('tr');
+      const name = tr.dataset.name;
+      const deleting = button.classList.contains('delete-file');
+      if (deleting && !window.confirm('Delete "' + name + '"? This cannot be undone.')) return;
+      const buttons = tr.querySelectorAll('button');
+      buttons.forEach(b => { b.disabled = true; });
+      actionStatus.textContent = '';
+      try {
+        const target = new URL(tr.querySelector('.c-name a').href);
+        const temporary = !Number(tr.dataset.expires || 0);
+        if (!deleting) target.searchParams.set('temporary', String(temporary));
+        const response = await fetch(target, { method: deleting ? 'DELETE' : 'PATCH' });
+        if (!response.ok) throw new Error(await response.text());
+        if (deleting) {
+          tr.remove();
+          actionStatus.textContent = 'Deleted "' + name + '".';
+        } else {
+          const result = await response.json();
+          tr.dataset.expires = String(result.expiresAt);
+          updateExpiry(tr);
+          actionStatus.textContent = temporary ? '"' + name + '" will be deleted in five minutes.' : '"' + name + '" will be kept.';
+        }
+      } catch (error) {
+        actionStatus.textContent = 'Unable to change "' + name + '": ' + error.message;
+      } finally { buttons.forEach(b => { b.disabled = false; }); }
+    });
+    let checkingExpirations = false;
+    async function refreshExpirations() {
+      const due = [];
+      tbody.querySelectorAll('tr.filerow:not(.parent)').forEach(function(tr) {
+        updateExpiry(tr);
+        const expires = Number(tr.dataset.expires || 0);
+        if (expires && expires <= Math.floor(Date.now() / 1000)) due.push(tr);
+      });
+      if (checkingExpirations || !due.length) return;
+      checkingExpirations = true;
+      try {
+        for (const tr of due) {
+          const response = await fetch(tr.querySelector('.c-name a').href, { method: 'HEAD', cache: 'no-store' });
+          if (response.status === 404) tr.remove();
+        }
+      } catch (_) { /* Retry on the next tick after a connection failure. */ }
+      finally { checkingExpirations = false; }
+    }
+    refreshExpirations();
+    setInterval(refreshExpirations, 1000);
 
     // ---- uploads (draft-ietf-httpbis-resumable-upload) ----
     const uploadsEl = document.getElementById('uploads');
@@ -779,7 +933,7 @@
     document.addEventListener('paste', function(e) {
       if (!fileInput) return;
       const ae = document.activeElement;
-      if (ae && (ae.id === 'paste-input' || ae.id === 'search')) return;
+      if (ae && (ae.id === 'paste-input' || ae.id === 'search' || ae.id === 'folder-name')) return;
       const text = e.clipboardData && e.clipboardData.getData('text/plain');
       if (text) uploadText(text);
     });

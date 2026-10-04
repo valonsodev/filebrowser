@@ -9,7 +9,9 @@ import (
 	"io/fs"
 	"log"
 	"math"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -38,6 +40,7 @@ type FileInfo struct {
 	URL          string
 	SizeBytes    int64 // raw size (recursive for dirs) for client-side sorting
 	ModUnix      int64 // mod time as unix seconds for client-side sorting
+	ExpiresUnix  int64
 }
 
 // Breadcrumb segment for the current path
@@ -71,6 +74,7 @@ var (
 	resumableAppends   atomic.Uint64
 
 	requestDurationBuckets = map[string]map[string]*atomic.Uint64{
+		"DELETE": {"0.1": &atomic.Uint64{}, "0.5": &atomic.Uint64{}, "1.0": &atomic.Uint64{}, "+Inf": &atomic.Uint64{}},
 		"GET": {
 			"0.1":  &atomic.Uint64{},
 			"0.5":  &atomic.Uint64{},
@@ -97,16 +101,18 @@ var (
 		},
 	}
 	requestDurationSum = map[string]*atomic.Uint64{
-		"GET":   &atomic.Uint64{},
-		"PUT":   &atomic.Uint64{},
-		"POST":  &atomic.Uint64{},
-		"PATCH": &atomic.Uint64{},
+		"DELETE": &atomic.Uint64{},
+		"GET":    &atomic.Uint64{},
+		"PUT":    &atomic.Uint64{},
+		"POST":   &atomic.Uint64{},
+		"PATCH":  &atomic.Uint64{},
 	}
 	requestDurationCount = map[string]*atomic.Uint64{
-		"GET":   &atomic.Uint64{},
-		"PUT":   &atomic.Uint64{},
-		"POST":  &atomic.Uint64{},
-		"PATCH": &atomic.Uint64{},
+		"DELETE": &atomic.Uint64{},
+		"GET":    &atomic.Uint64{},
+		"PUT":    &atomic.Uint64{},
+		"POST":   &atomic.Uint64{},
+		"PATCH":  &atomic.Uint64{},
 	}
 )
 
@@ -148,6 +154,11 @@ func main() {
 
 	os.MkdirAll(filesDir, os.ModePerm)
 
+	if err := loadExpirations(); err != nil {
+		log.Fatalf("Loading file expirations: %v", err)
+	}
+	startFileJanitor()
+
 	if enableUpload {
 		// Resumable uploads keep in-memory state only, so partials from a
 		// previous run are useless: wipe them and start a janitor to expire
@@ -173,7 +184,7 @@ func main() {
 		log.Printf("Metrics endpoint is disabled")
 	}
 
-	log.Fatal(http.ListenAndServe(port, nil))
+	log.Fatal(http.ListenAndServe(net.JoinHostPort(address, portFlag), nil))
 }
 
 func pathHandler(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +200,12 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 		httpRequestsTotal.Add(1)
 	}
 
+	if err := browserOriginProtection.Check(r); err != nil {
+		httpRequestsError.Add(1)
+		http.Error(w, "Cross-origin file changes are forbidden", http.StatusForbidden)
+		return
+	}
+
 	// Resumable upload resources live under a reserved prefix and are handled
 	// before any file logic (spec: draft-ietf-httpbis-resumable-upload-11).
 	if strings.HasPrefix(r.URL.Path, uploadURLPrefix) {
@@ -196,7 +213,15 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if reservedFilePath(r.URL.Path) {
+		http.NotFound(w, r)
+		return
+	}
+
 	switch r.Method {
+	case http.MethodDelete, http.MethodPatch:
+		handleFileAction(w, r)
+		return
 	case http.MethodOptions:
 		handleOptions(w, r)
 		return
@@ -204,9 +229,10 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 		handlePutUpload(w, r)
 		return
 	case http.MethodPost:
-		// POST is only meaningful as a resumable upload creation request.
 		if hasUploadCreation(r) {
 			handleUploadCreation(w, r)
+		} else if r.URL.Query().Get("folder") == "true" {
+			handleCreateFolder(w, r)
 		} else {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -214,39 +240,44 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	urlPath := r.URL.Path
-	fullPath := filepath.Join(filesDir, urlPath)
-
-	absFilesDir, _ := filepath.Abs(filesDir)
-	absPath, _ := filepath.Abs(fullPath)
-	if !strings.HasPrefix(absPath, absFilesDir) {
-		if r.URL.Path != "/metrics" {
-			httpRequestsError.Add(1)
-		}
+	rel, err := userPath(urlPath)
+	if err != nil {
+		httpRequestsError.Add(1)
+		http.Error(w, "Invalid file path", http.StatusForbidden)
+		return
+	}
+	root, err := os.OpenRoot(filesDir)
+	if err != nil {
+		httpRequestsError.Add(1)
+		http.Error(w, "Unable to access files", http.StatusInternalServerError)
+		return
+	}
+	defer root.Close()
+	entry, err := root.Lstat(rel)
+	if err != nil {
+		httpRequestsError.Add(1)
 		http.NotFound(w, r)
 		return
 	}
-
-	if _, err := os.Stat(filesDir); os.IsNotExist(err) {
-		if r.URL.Path != "/metrics" {
-			httpRequestsError.Add(1)
-		}
-		http.Error(w, fmt.Sprintf("files dir %s: no such directory", filesDir), http.StatusInternalServerError)
+	if !entry.IsDir() && !entry.Mode().IsRegular() {
+		httpRequestsError.Add(1)
+		http.Error(w, "Only regular files and directories can be accessed", http.StatusForbidden)
 		return
 	}
-
-	info, err := os.Stat(fullPath)
+	f, err := root.Open(rel)
 	if err != nil {
-		if r.URL.Path != "/metrics" {
-			httpRequestsError.Add(1)
-		}
-		if urlPath == "/" {
-			http.Error(w, fmt.Sprintf("files dir %s: inaccessible or bad perms", filesDir), http.StatusInternalServerError)
-		} else {
-			http.Error(w, fmt.Sprintf("%s: no such file or directory", fullPath), http.StatusNotFound)
-		}
+		httpRequestsError.Add(1)
+		http.NotFound(w, r)
 		return
 	}
-
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		httpRequestsError.Add(1)
+		http.Error(w, "Unable to access file", http.StatusInternalServerError)
+		return
+	}
+	fullPath := filepath.Join(filesDir, rel)
 	if info.IsDir() {
 		if !strings.HasSuffix(urlPath, "/") {
 			http.Redirect(w, r, urlPath+"/", http.StatusFound)
@@ -256,12 +287,36 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 		listDirectory(w, fullPath, urlPath)
 	} else {
 		fileServes.Add(1)
-		http.ServeFile(w, r, fullPath)
+		w.Header().Set("Content-Disposition", fileDisposition(info.Name()))
+		if !info.Mode().IsRegular() {
+			httpRequestsError.Add(1)
+			http.Error(w, "Only regular files can be served", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		http.ServeContent(w, r, info.Name(), info.ModTime(), f)
 	}
 
 	if r.URL.Path != "/metrics" {
 		httpRequestsSuccess.Add(1)
 	}
+}
+
+func fileDisposition(name string) string {
+	// Keep a plain filename for curl and an encoded filename for browsers.
+	// Strip control characters so filesystem names cannot inject HTTP headers.
+	name = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 || r == '/' || r == '\\' {
+			return -1
+		}
+		return r
+	}, name)
+	if name == "" {
+		name = "download"
+	}
+	quoted := strings.NewReplacer("\\", "\\\\", "\"", "\\\"").Replace(name)
+	encoded := strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
+	return "attachment; filename=\"" + quoted + "\"; filename*=UTF-8''" + encoded
 }
 
 func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
@@ -283,12 +338,15 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 
 	fileInfos := make([]FileInfo, 0, len(entries))
 	for _, entry := range entries {
+		if entry.Name() == metadataDir {
+			continue
+		}
 		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
 
-		entryURL := entry.Name()
+		entryURL := "./" + url.PathEscape(entry.Name())
 		var size string
 		var sizeBytes int64
 		if entry.IsDir() {
@@ -313,6 +371,7 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 			URL:          entryURL,
 			SizeBytes:    sizeBytes,
 			ModUnix:      info.ModTime().Unix(),
+			ExpiresUnix:  expiryUnix(filepath.Join(dirPath, entry.Name())),
 		})
 	}
 
@@ -384,53 +443,38 @@ func handlePutUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	urlPath := r.URL.Path
-	fullPath := filepath.Join(filesDir, urlPath)
-
-	absFilesDir, _ := filepath.Abs(filesDir)
-	absPath, _ := filepath.Abs(fullPath)
-	if !strings.HasPrefix(absPath, absFilesDir) {
+	target, fullPath, ok := resolveTarget(w, urlPath)
+	if !ok {
 		uploadsError.Add(1)
 		httpRequestsError.Add(1)
-		http.Error(w, "Invalid file path", http.StatusForbidden)
 		return
 	}
-
-	if strings.HasSuffix(urlPath, "/") {
-		uploadsError.Add(1)
-		httpRequestsError.Add(1)
-		http.Error(w, "Cannot upload to a directory path", http.StatusBadRequest)
-		return
-	}
-
-	// Create parent directory if it doesn't exist
-	parentDir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(parentDir, os.ModePerm); err != nil {
-		uploadsError.Add(1)
-		httpRequestsError.Add(1)
-		http.Error(w, "Unable to create directory", http.StatusInternalServerError)
-		return
-	}
-
-	// Create or overwrite the file
-	dst, err := os.Create(fullPath)
+	dst, err := os.CreateTemp(uploadsDir, "put-")
 	if err != nil {
 		uploadsError.Add(1)
 		httpRequestsError.Add(1)
-		http.Error(w, "Unable to create file", http.StatusInternalServerError)
+		http.Error(w, "Unable to create upload", http.StatusInternalServerError)
 		return
 	}
-	defer dst.Close()
-
-	// Copy the request body to the file
-	_, err = io.Copy(dst, r.Body)
-	if err != nil {
+	defer os.Remove(dst.Name())
+	_, copyErr := io.Copy(dst, r.Body)
+	closeErr := dst.Close()
+	if copyErr != nil || closeErr != nil {
 		uploadsError.Add(1)
 		httpRequestsError.Add(1)
 		http.Error(w, "Error saving file", http.StatusInternalServerError)
 		return
 	}
-
+	fileActions.Lock()
+	defer fileActions.Unlock()
+	if err := installUploadedFile(dst.Name(), target); err != nil {
+		uploadsError.Add(1)
+		httpRequestsError.Add(1)
+		http.Error(w, "Unable to save file", http.StatusForbidden)
+		return
+	}
 	invalidateDirSizes(fullPath)
+	clearFileExpiry(target)
 
 	uploadsSuccess.Add(1)
 	httpRequestsSuccess.Add(1)

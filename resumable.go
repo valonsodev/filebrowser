@@ -26,7 +26,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -536,7 +535,7 @@ func optionsUpload(w http.ResponseWriter, r *http.Request) {
 // support for resumable uploads (spec §4.1.4).
 func handleOptions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Accept-Patch", partialUploadMediaType)
-	w.Header().Set("Allow", "GET, HEAD, PUT, POST, OPTIONS")
+	w.Header().Set("Allow", "GET, HEAD, PUT, POST, PATCH, DELETE, OPTIONS")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -546,19 +545,16 @@ func handleOptions(w http.ResponseWriter, r *http.Request) {
 // the relative target path (e.g. "sub/file.txt") and absolute full path. It
 // applies the same containment and trailing-slash rules as the legacy upload.
 func resolveTarget(w http.ResponseWriter, urlPath string) (string, string, bool) {
-	fullPath := filepath.Join(filesDir, urlPath)
-	absFilesDir, _ := filepath.Abs(filesDir)
-	absPath, _ := filepath.Abs(fullPath)
-	if absPath != absFilesDir && !strings.HasPrefix(absPath, absFilesDir+string(os.PathSeparator)) {
-		writeProblem(w, http.StatusForbidden, "", "invalid file path")
-		return "", "", false
-	}
 	if strings.HasSuffix(urlPath, "/") {
 		writeProblem(w, http.StatusBadRequest, "", "cannot upload to a directory path")
 		return "", "", false
 	}
-	target := strings.TrimPrefix(urlPath, "/")
-	return target, fullPath, true
+	target, err := userPath(urlPath)
+	if err != nil || target == "." {
+		writeProblem(w, http.StatusForbidden, "", "invalid file path")
+		return "", "", false
+	}
+	return target, filepath.Join(filesDir, target), true
 }
 
 // writePartialAt writes src into the upload's partial file starting at off and
@@ -592,17 +588,17 @@ func writePartialAt(u *upload, off int64, src io.Reader) (n int64, serverErr, cl
 // finalizeUpload marks the upload complete and moves the assembled partial file
 // to its target path under filesDir. The caller must hold u.mu.
 func finalizeUpload(u *upload) error {
+	fileActions.Lock()
+	defer fileActions.Unlock()
 	_, fullPath, ok := validateStoredTarget(u.targetPath)
 	if !ok {
 		return errors.New("target path is no longer valid")
 	}
-	if err := os.MkdirAll(filepath.Dir(fullPath), os.ModePerm); err != nil {
-		return err
-	}
-	if err := moveFile(u.partialPath(), fullPath); err != nil {
+	if err := installUploadedFile(u.partialPath(), u.targetPath); err != nil {
 		return err
 	}
 	invalidateDirSizes(fullPath)
+	clearFileExpiry(u.targetPath)
 	u.complete = true
 	if !u.lengthKnown {
 		u.length = u.offset
@@ -614,64 +610,15 @@ func finalizeUpload(u *upload) error {
 
 // validateStoredTarget re-validates a stored target path at finalize time.
 func validateStoredTarget(target string) (string, string, bool) {
-	fullPath := filepath.Join(filesDir, target)
-	absFilesDir, _ := filepath.Abs(filesDir)
-	absPath, _ := filepath.Abs(fullPath)
-	if absPath != absFilesDir && !strings.HasPrefix(absPath, absFilesDir+string(os.PathSeparator)) {
+	root, err := os.OpenRoot(filesDir)
+	if err != nil {
 		return "", "", false
 	}
-	return target, fullPath, true
-}
-
-// moveFile renames src to dst, falling back to copy+remove across filesystems
-// (os.Rename fails with EXDEV when src and dst are on different mounts).
-func moveFile(src, dst string) error {
-	if err := os.Rename(src, dst); err == nil {
-		return nil
-	} else if !isCrossDevice(err) {
-		return err
+	defer root.Close()
+	if target == "." || checkUserPath(root, target) != nil {
+		return "", "", false
 	}
-
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	tmp := dst + ".part"
-	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, moveBufSize)
-	if _, err := io.CopyBuffer(out, in, buf); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Sync(); err != nil {
-		out.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := out.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	os.Remove(src)
-	return nil
-}
-
-func isCrossDevice(err error) bool {
-	var linkErr *os.LinkError
-	if errors.As(err, &linkErr) {
-		return errors.Is(linkErr.Err, syscall.EXDEV)
-	}
-	return errors.Is(err, syscall.EXDEV)
+	return target, filepath.Join(filesDir, target), true
 }
 
 // setUploadStateHeaders writes the Upload-Offset, Upload-Complete and (when
