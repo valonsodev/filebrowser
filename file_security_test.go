@@ -403,3 +403,82 @@ func TestUploadDoesNotOverwriteHardlinkTarget(t *testing.T) {
 		t.Fatal("upload modified hardlink target")
 	}
 }
+
+func TestTemporaryUploadSchedulesExpiryOnCompletion(t *testing.T) {
+	securityWorkspace(t)
+	w := securityRequest("POST", "/temporary.txt?temporary=true", strings.NewReader(""), map[string]string{"Upload-Complete": "?0", "Upload-Length": "3"})
+	if w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	location := w.Header().Get("Location")
+	if len(fileActions.expirations) != 0 || w.Header().Get("File-Expires-At") != "" {
+		t.Fatal("incomplete upload started expiry")
+	}
+	before := time.Now().Unix()
+	w = securityRequest("PATCH", location, strings.NewReader("new"), map[string]string{"Content-Type": partialUploadMediaType, "Upload-Complete": "?1", "Upload-Offset": "0"})
+	if w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	expiry, ok := fileActions.expirations["temporary.txt"]
+	if !ok || expiry.ExpiresAt.Unix() < before+299 || expiry.ExpiresAt.Unix() > before+301 {
+		t.Fatal("expiry not scheduled five minutes from completion")
+	}
+	if w.Header().Get("File-Expires-At") == "" {
+		t.Fatal("completion did not return expiry")
+	}
+	head := securityRequest("HEAD", location, nil, nil)
+	if head.Header().Get("File-Expires-At") != w.Header().Get("File-Expires-At") {
+		t.Fatal("resume lookup lost completion expiry")
+	}
+	fileActions.expirations = make(map[string]fileExpiry)
+	if err := loadExpirations(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fileActions.expirations["temporary.txt"]; !ok {
+		t.Fatal("temporary upload expiry was not persisted")
+	}
+	if got := securityRequest("PUT", "/temporary.txt", strings.NewReader("permanent"), nil).Code; got != 201 {
+		t.Fatal(got)
+	}
+	if len(fileActions.expirations) != 0 {
+		t.Fatal("permanent replacement retained expiry")
+	}
+}
+
+func TestTemporaryPutAndInvalidUploadSetting(t *testing.T) {
+	securityWorkspace(t)
+	w := securityRequest("PUT", "/temporary.txt?temporary=true", strings.NewReader("temporary"), nil)
+	if w.Code != 201 || w.Header().Get("File-Expires-At") == "" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	for _, method := range []string{"PUT", "POST"} {
+		headers := map[string]string{}
+		if method == "POST" {
+			headers["Upload-Complete"] = "?0"
+		}
+		if got := securityRequest(method, "/invalid.txt?temporary=invalid", strings.NewReader("bad"), headers).Code; got != 400 {
+			t.Fatal(method, got)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(filesDir, "invalid.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("invalid setting created a file")
+	}
+}
+
+func TestTemporaryUploadRequiresDurableExpiry(t *testing.T) {
+	securityWorkspace(t)
+	securityWrite(t, "keep.txt", "original")
+	if err := os.MkdirAll(filepath.Join(filesDir, metadataDir, "expirations.json"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if got := securityRequest("PUT", "/keep.txt?temporary=true", strings.NewReader("replacement"), nil).Code; got < 400 {
+		t.Fatal("temporary upload succeeded without persistent expiry")
+	}
+	data, err := os.ReadFile(filepath.Join(filesDir, "keep.txt"))
+	if err != nil || string(data) != "original" {
+		t.Fatal("failed temporary upload replaced original")
+	}
+	if len(fileActions.expirations) != 0 {
+		t.Fatal("failed upload left an in-memory expiry")
+	}
+}

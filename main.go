@@ -442,6 +442,13 @@ func handlePutUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	temporary, err := temporaryUpload(r)
+	if err != nil {
+		uploadsError.Add(1)
+		httpRequestsError.Add(1)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	urlPath := r.URL.Path
 	target, fullPath, ok := resolveTarget(w, urlPath)
 	if !ok {
@@ -467,14 +474,16 @@ func handlePutUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	fileActions.Lock()
 	defer fileActions.Unlock()
-	if err := installUploadedFile(dst.Name(), target); err != nil {
+	if err := installUploadedFile(dst.Name(), target, temporary); err != nil {
 		uploadsError.Add(1)
 		httpRequestsError.Add(1)
 		http.Error(w, "Unable to save file", http.StatusForbidden)
 		return
 	}
 	invalidateDirSizes(fullPath)
-	clearFileExpiry(target)
+	if expiry, ok := fileActions.expirations[target]; ok {
+		w.Header().Set("File-Expires-At", strconv.FormatInt(expiry.ExpiresAt.Unix(), 10))
+	}
 
 	uploadsSuccess.Add(1)
 	httpRequestsSuccess.Add(1)

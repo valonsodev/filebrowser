@@ -237,15 +237,17 @@
   :root[data-theme="light"] td.c-name a { text-decoration-color: rgba(0,0,0,0.35); }
   td.c-name a:hover { color: var(--fg-strong); text-decoration-color: var(--fg-strong); }
   td.c-size, td.c-date { color: var(--muted); white-space: nowrap; }
-  .c-actions { width: 230px; }
-  .file-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .temporary-toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; }
+  .temporary-toggle input { margin: 0; accent-color: var(--fg-strong); }
+  .c-actions { width: 1%; white-space: nowrap; }
+  .file-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; white-space: nowrap; }
   .file-actions .btn { padding: 4px 8px; font-size: 12px; }
   .file-actions .delete-file { color: #e66; }
-  .expiry { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .expiry { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .expiry:empty { display: none; }
   #file-action-status { padding: 8px 16px; color: var(--muted); }
   #file-action-status:empty { display: none; }
   @media (max-width: 640px) {
-    .c-actions { width: 135px; }
     td.c-actions { padding: 8px; }
   }
   tr.new-row td.c-name a { color: var(--fg-strong); }
@@ -320,6 +322,12 @@
       <textarea class="field grow" id="paste-input" rows="1" placeholder="Paste or type text here..." autocomplete="off" spellcheck="false"></textarea>
       <button class="btn" id="paste-btn">Upload text</button>
     </div>
+    <div class="row-controls">
+      <label class="temporary-toggle" title="Applies to new file, text, and drag-and-drop uploads. Deletion starts after each upload finishes.">
+        <input id="temporary-uploads" type="checkbox" role="switch">
+        Temporary uploads (5 min)
+      </label>
+    </div>
     <form class="row-controls" id="folder-form" novalidate>
       <input class="field grow" id="folder-name" type="text" placeholder="Folder name..." aria-label="Folder name" aria-describedby="folder-status" autocomplete="off" spellcheck="false">
       <button class="btn" id="folder-btn" type="submit">Create folder</button>
@@ -357,9 +365,9 @@
         <td class="c-date">{{.LastModified}}</td>
         {{if not $.DisableUpload}}<td class="c-actions">
           {{if not .IsDir}}<div class="file-actions">
-            <button class="btn temporary-file" type="button">{{if .ExpiresUnix}}Keep file{{else}}Temporary (5 min){{end}}</button>
+            <span class="expiry"></span>
             <button class="btn delete-file" type="button">Delete</button>
-          </div><span class="expiry"></span>{{end}}
+          </div>{{end}}
         </td>{{end}}
       </tr>
       {{end}}
@@ -383,6 +391,7 @@
     const currentPath = '{{.CurrentPath}}';
     const canChangeFiles = {{not .DisableUpload}};
     const fileIco = document.getElementById('ico-file').innerHTML;
+    const temporaryUploads = document.getElementById('temporary-uploads');
 
     function fmtBytes(b) {
       if (b < 1024) return b + ' B';
@@ -470,12 +479,12 @@
       tr.append(c1, c2, c3);
       if (canChangeFiles) {
         const actions = document.createElement('td'); actions.className = 'c-actions';
-        actions.innerHTML = '<div class="file-actions"><button class="btn temporary-file" type="button">Temporary (5 min)</button><button class="btn delete-file" type="button">Delete</button></div><span class="expiry"></span>';
+        actions.innerHTML = '<div class="file-actions"><span class="expiry"></span><button class="btn delete-file" type="button">Delete</button></div>';
         tr.appendChild(actions);
       }
       return tr;
     }
-    function addOrUpdateFile(name, size) {
+    function addOrUpdateFile(name, size, expiresAt) {
       const lname = name.toLowerCase();
       const dateStr = nowStamp(), mtime = Math.floor(Date.now() / 1000);
       let tr = null;
@@ -485,8 +494,7 @@
       }
       if (tr) {
         tr.dataset.size = String(size); tr.dataset.mtime = String(mtime);
-        tr.dataset.expires = '0';
-        updateExpiry(tr);
+
         const cs = tr.querySelector('.c-size'); if (cs) cs.textContent = fmtBytes(size);
         const cd = tr.querySelector('.c-date'); if (cd) cd.textContent = dateStr;
         tr.classList.add('flash');
@@ -497,6 +505,8 @@
         if (parent) parent.after(tr); else tbody.prepend(tr);
         setTimeout(function() { tr.classList.remove('flash', 'new-row'); }, 1500);
       }
+      tr.dataset.expires = String(expiresAt || 0);
+      updateExpiry(tr);
     }
 
     // ---- file deletion and temporary files ----
@@ -556,8 +566,6 @@
     function updateExpiry(tr) {
       const expires = Number(tr.dataset.expires || 0);
       const label = tr.querySelector('.expiry');
-      const button = tr.querySelector('.temporary-file');
-      if (button) button.textContent = expires ? 'Keep file' : 'Temporary (5 min)';
       if (!label) return;
       if (!expires) { label.textContent = ''; return; }
       const remaining = Math.max(0, expires - Math.floor(Date.now() / 1000));
@@ -565,33 +573,21 @@
       label.title = 'Scheduled deletion: ' + new Date(expires * 1000).toLocaleString();
     }
     tbody.addEventListener('click', async function(event) {
-      const button = event.target.closest('.delete-file, .temporary-file');
+      const button = event.target.closest('.delete-file');
       if (!button) return;
       const tr = button.closest('tr');
       const name = tr.dataset.name;
-      const deleting = button.classList.contains('delete-file');
-      if (deleting && !window.confirm('Delete "' + name + '"? This cannot be undone.')) return;
-      const buttons = tr.querySelectorAll('button');
-      buttons.forEach(b => { b.disabled = true; });
+      if (!window.confirm('Delete "' + name + '"? This cannot be undone.')) return;
+      button.disabled = true;
       actionStatus.textContent = '';
       try {
-        const target = new URL(tr.querySelector('.c-name a').href);
-        const temporary = !Number(tr.dataset.expires || 0);
-        if (!deleting) target.searchParams.set('temporary', String(temporary));
-        const response = await fetch(target, { method: deleting ? 'DELETE' : 'PATCH' });
+        const response = await fetch(tr.querySelector('.c-name a').href, { method: 'DELETE' });
         if (!response.ok) throw new Error(await response.text());
-        if (deleting) {
-          tr.remove();
-          actionStatus.textContent = 'Deleted "' + name + '".';
-        } else {
-          const result = await response.json();
-          tr.dataset.expires = String(result.expiresAt);
-          updateExpiry(tr);
-          actionStatus.textContent = temporary ? '"' + name + '" will be deleted in five minutes.' : '"' + name + '" will be kept.';
-        }
+        tr.remove();
+        actionStatus.textContent = 'Deleted "' + name + '".';
       } catch (error) {
-        actionStatus.textContent = 'Unable to change "' + name + '": ' + error.message;
-      } finally { buttons.forEach(b => { b.disabled = false; }); }
+        actionStatus.textContent = 'Unable to delete "' + name + '": ' + error.message;
+      } finally { button.disabled = false; }
     });
     let checkingExpirations = false;
     async function refreshExpirations() {
@@ -671,6 +667,8 @@
     class Uploader {
       constructor(file) {
         this.file = file;
+        this.temporary = Boolean(temporaryUploads && temporaryUploads.checked);
+        this.expiresAt = 0;
         this.name = file.name;
         this.size = file.size;
         this.offset = 0;
@@ -771,7 +769,8 @@
       }
 
       async create() {
-        const url = currentPath + encodeURIComponent(this.name);
+        const url = new URL(encodeURIComponent(this.name), window.location.href);
+        if (this.temporary) url.searchParams.set('temporary', 'true');
         const xhr = await this.request('POST', url,
           { 'Upload-Complete': '?0', 'Upload-Length': String(this.size) }, new Blob([]));
         if (xhr.status !== 201) throw new Error('create failed (' + xhr.status + ')');
@@ -783,6 +782,7 @@
       async syncOffset() {
         const xhr = await this.request('HEAD', this.location, {}, null);
         if (xhr.status === 404) throw new Error('upload expired');
+        this.expiresAt = Number(xhr.getResponseHeader('File-Expires-At') || 0);
         const off = parseInt(xhr.getResponseHeader('Upload-Offset') || '', 10);
         if (!isNaN(off)) { this.offset = off; this.loaded = off; }
         if (xhr.getResponseHeader('Upload-Complete') === '?1') this.completed = true;
@@ -797,6 +797,7 @@
           blob,
           (e) => this.onProgress(start + e.loaded))
           .then((xhr) => {
+            this.expiresAt = Number(xhr.getResponseHeader('File-Expires-At') || 0);
             if (xhr.status === 204 || xhr.status === 201) {
               this.offset = end; this.loaded = end;
               if (xhr.status === 201) this.completed = true;
@@ -838,7 +839,7 @@
         this.setClass(); this.render();
         const c = this.el.querySelector('.u-cancel');
         if (c) { c.title = 'Dismiss'; c.onclick = () => this.remove(); }
-        addOrUpdateFile(this.name, this.size);
+        addOrUpdateFile(this.name, this.size, this.expiresAt);
         setTimeout(() => this.remove(), DISMISS_MS);
       }
 

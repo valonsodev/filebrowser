@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 var browserOriginProtection = http.NewCrossOriginProtection()
@@ -83,7 +84,7 @@ func openMetadataRoot(create bool) (*os.Root, error) {
 
 // Receive bytes without holding the file-actions lock. Install a complete file
 // atomically under filesDir, using a private temporary file on the same volume.
-func installUploadedFile(src, target string) error {
+func installUploadedFile(src, target string, temporary bool) error {
 	root, err := os.OpenRoot(filesDir)
 	if err != nil {
 		return err
@@ -123,6 +124,10 @@ func installUploadedFile(src, target string) error {
 	if copyErr == nil {
 		copyErr = out.Sync()
 	}
+	info, statErr := out.Stat()
+	if copyErr == nil {
+		copyErr = statErr
+	}
 	closeErr := out.Close()
 	if copyErr != nil {
 		return copyErr
@@ -130,7 +135,30 @@ func installUploadedFile(src, target string) error {
 	if closeErr != nil {
 		return closeErr
 	}
+	old, existed := fileActions.expirations[target]
+	restore := func() {
+		if existed {
+			fileActions.expirations[target] = old
+		} else {
+			delete(fileActions.expirations, target)
+		}
+	}
+	if temporary {
+		fileActions.expirations[target] = fileExpiry{ExpiresAt: time.Now().Add(temporaryLifetime), Modified: info.ModTime(), Size: info.Size()}
+	} else {
+		delete(fileActions.expirations, target)
+	}
+	if temporary || existed {
+		if err := saveExpirations(); err != nil {
+			restore()
+			return err
+		}
+	}
 	if err := root.Rename(filepath.Join(metadataDir, tmp), target); err != nil {
+		restore()
+		if temporary || existed {
+			return errors.Join(err, saveExpirations())
+		}
 		return err
 	}
 	// The installed file is authoritative even if partial cleanup fails.

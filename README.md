@@ -37,14 +37,13 @@ services:
 
 # file actions
 
-With `--enable-upload` or `ENABLE_UPLOAD=true`, each file has two browser actions:
+With `--enable-upload` or `ENABLE_UPLOAD=true`, **Delete** removes a file after confirmation.
 
-- **Delete** removes the file immediately after confirmation.
-- **Temporary (5 min)** schedules deletion five minutes from clicking the button. A countdown shows the remaining time; **Keep file** cancels deletion.
+Turn on **Temporary uploads (5 min)** before uploading to have new uploads deleted automatically five minutes after each upload completes. It applies to file selection, pasted text, and drag-and-drop uploads. Turning it off makes subsequent uploads permanent; queued or in-progress uploads keep the setting they started with. File rows show a countdown beside Delete without wrapping actions onto another line.
 
-Deletion runs on the server even when the browser is closed. Expiry times are stored in the reserved `.filebrowser` directory on the files volume and survive restarts; overdue files are removed at startup. Overwriting a file through an upload clears its previous expiry. These actions apply to regular files, not folders.
+Deletion runs on the server even when the browser is closed. Expiry times are stored in the reserved `.filebrowser` directory on the files volume and survive restarts; overdue files are removed at startup. Uploading a permanent replacement clears its previous expiry.
 
-API clients can use `DELETE /path/to/file` to delete a file, `PATCH /path/to/file?temporary=true` to schedule expiry, or `PATCH /path/to/file?temporary=false` to cancel it. File mutations share the upload setting and its existing access model.
+API clients can append `?temporary=true` to a PUT or resumable upload creation request to upload a temporary file. The completion response includes `File-Expires-At` as Unix seconds. They can use `DELETE /path/to/file` to delete a file, `PATCH /path/to/file?temporary=true` to schedule expiry, or `PATCH /path/to/file?temporary=false` to cancel it. File mutations share the upload setting and its existing access model.
 
 Use the **Folder name** row and **Create folder** button to create a folder in the current directory. Enter submits the name; errors appear below the row. The new folder appears in the list without navigating away. Folder creation requires uploads to be enabled. API clients can use `POST /path/to/new-folder/?folder=true`; the parent directory must exist, and existing files or folders are never overwritten.
 

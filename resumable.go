@@ -64,6 +64,8 @@ type upload struct {
 	length      int64
 	lengthKnown bool
 	complete    bool
+	temporary   bool
+	expiresAt   int64
 	deleted     bool
 	createdAt   time.Time
 	updatedAt   time.Time
@@ -240,6 +242,12 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uploadsTotal.Add(1)
+	temporary, err := temporaryUpload(r)
+	if err != nil {
+		uploadsError.Add(1)
+		writeProblem(w, http.StatusBadRequest, "", err.Error())
+		return
+	}
 
 	complete, ok := parseSFBool(r.Header.Get("Upload-Complete"))
 	if !ok {
@@ -268,6 +276,7 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 		writeProblem(w, http.StatusInternalServerError, "", "unable to create upload")
 		return
 	}
+	u.temporary = temporary
 	resumableCreated.Add(1)
 
 	// Best-effort 104 (Upload Resumption Supported) interim response so an
@@ -594,11 +603,13 @@ func finalizeUpload(u *upload) error {
 	if !ok {
 		return errors.New("target path is no longer valid")
 	}
-	if err := installUploadedFile(u.partialPath(), u.targetPath); err != nil {
+	if err := installUploadedFile(u.partialPath(), u.targetPath, u.temporary); err != nil {
 		return err
 	}
 	invalidateDirSizes(fullPath)
-	clearFileExpiry(u.targetPath)
+	if expiry, ok := fileActions.expirations[u.targetPath]; ok {
+		u.expiresAt = expiry.ExpiresAt.Unix()
+	}
 	u.complete = true
 	if !u.lengthKnown {
 		u.length = u.offset
@@ -624,6 +635,9 @@ func validateStoredTarget(target string) (string, string, bool) {
 // setUploadStateHeaders writes the Upload-Offset, Upload-Complete and (when
 // known) Upload-Length headers describing the upload's current state.
 func setUploadStateHeaders(w http.ResponseWriter, u *upload) {
+	if u.complete && u.expiresAt > 0 {
+		w.Header().Set("File-Expires-At", strconv.FormatInt(u.expiresAt, 10))
+	}
 	w.Header().Set("Upload-Offset", strconv.FormatInt(u.offset, 10))
 	w.Header().Set("Upload-Complete", formatSFBool(u.complete))
 	if u.lengthKnown {

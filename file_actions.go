@@ -328,3 +328,15 @@ func startFileJanitor() {
 		}
 	}()
 }
+
+// The choice is captured when an upload starts and applied only on completion.
+func temporaryUpload(r *http.Request) (bool, error) {
+	switch r.URL.Query().Get("temporary") {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, errors.New("temporary must be true or false")
+	}
+}
