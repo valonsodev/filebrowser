@@ -238,6 +238,43 @@ type brokenUploadReader struct{}
 
 func (brokenUploadReader) Read([]byte) (int, error) { return 0, errors.New("connection failed") }
 
+func TestInterruptedTemporaryUploadResumesFromStoredBytes(t *testing.T) {
+	securityWorkspace(t)
+	securityWrite(t, "temporary.txt", "original")
+	w := securityRequest("POST", "/temporary.txt?temporary=true", strings.NewReader(""), map[string]string{"Upload-Complete": "?0", "Upload-Length": "6"})
+	if w.Code != 201 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	location := w.Header().Get("Location")
+	interrupted := io.MultiReader(strings.NewReader("abc"), brokenUploadReader{})
+	w = securityRequest("PATCH", location, interrupted, map[string]string{"Content-Type": partialUploadMediaType, "Upload-Complete": "?1", "Upload-Offset": "0"})
+	if w.Code != 204 || w.Header().Get("Upload-Offset") != "3" || w.Header().Get("Upload-Complete") != "?0" {
+		t.Fatalf("interrupted upload: %d %v", w.Code, w.Header())
+	}
+	if len(fileActions.expirations) != 0 {
+		t.Fatal("interruption started expiry")
+	}
+	data, err := os.ReadFile(filepath.Join(filesDir, "temporary.txt"))
+	if err != nil || string(data) != "original" {
+		t.Fatal("interruption replaced existing file")
+	}
+	w = securityRequest("HEAD", location, nil, nil)
+	if w.Code != 204 || w.Header().Get("Upload-Offset") != "3" {
+		t.Fatal("resume lookup lost stored bytes")
+	}
+	w = securityRequest("PATCH", location, strings.NewReader("def"), map[string]string{"Content-Type": partialUploadMediaType, "Upload-Complete": "?1", "Upload-Offset": "3"})
+	if w.Code != 201 || w.Header().Get("File-Expires-At") == "" {
+		t.Fatalf("completion: %d %v", w.Code, w.Header())
+	}
+	data, err = os.ReadFile(filepath.Join(filesDir, "temporary.txt"))
+	if err != nil || string(data) != "abcdef" {
+		t.Fatalf("resumed content: %q, %v", data, err)
+	}
+	if _, ok := fileActions.expirations["temporary.txt"]; !ok {
+		t.Fatal("resumed temporary upload lost expiry")
+	}
+}
+
 func TestInterruptedUploadPreservesExistingFile(t *testing.T) {
 	securityWorkspace(t)
 	securityWrite(t, "keep.txt", "original")

@@ -13,6 +13,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -53,17 +54,21 @@ const (
 // uploadIDPattern validates an upload id taken from the URL before it is used
 // to build a filesystem path. IDs are generated as 16 random bytes hex-encoded.
 var uploadIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+var uploadHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+var errUploadHashMismatch = errors.New("uploaded file does not match Upload-SHA256")
 
 // upload is the server-side state of a single resumable upload.
 type upload struct {
 	id         string
 	targetPath string // final path under filesDir, e.g. "sub/file.txt"
+	sha256     string // optional full-file digest used to discover unfinished uploads
 
 	mu          sync.Mutex // exclusive access-lock (spec §4.6)
 	offset      int64
 	length      int64
 	lengthKnown bool
 	complete    bool
+	finalizing  bool // digest verified; installation may be interrupted by a restart
 	temporary   bool
 	expiresAt   int64
 	deleted     bool
@@ -75,6 +80,9 @@ type upload struct {
 type uploadRegistry struct {
 	mu sync.Mutex
 	m  map[string]*upload
+	// Serialize discovery and allocation so simultaneous hash lookups cannot
+	// create two resources for the same file. Per-upload locks protect transfers.
+	discoveryMu sync.Mutex
 }
 
 func newUploadRegistry() *uploadRegistry {
@@ -92,7 +100,8 @@ func (r *uploadRegistry) get(id string) (*upload, bool) {
 }
 
 // create allocates a new upload resource with an unguessable id.
-func (r *uploadRegistry) create(targetPath string, length int64, lengthKnown bool) (*upload, error) {
+// The returned resource is locked until its creator has saved its initial state.
+func (r *uploadRegistry) create(targetPath string, length int64, lengthKnown, temporary bool, hash string) (*upload, error) {
 	id, err := newUploadID()
 	if err != nil {
 		return nil, err
@@ -103,13 +112,43 @@ func (r *uploadRegistry) create(targetPath string, length int64, lengthKnown boo
 		targetPath:  targetPath,
 		length:      length,
 		lengthKnown: lengthKnown,
+		temporary:   temporary,
+		sha256:      hash,
 		createdAt:   now,
 		updatedAt:   now,
 	}
+	u.mu.Lock()
 	r.mu.Lock()
 	r.m[id] = u
 	r.mu.Unlock()
 	return u, nil
+}
+
+func (r *uploadRegistry) snapshot() []*upload {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	uploads := make([]*upload, 0, len(r.m))
+	for _, u := range r.m {
+		uploads = append(uploads, u)
+	}
+	return uploads
+}
+
+// The caller holds discoveryMu; a matching resource is returned locked.
+func (r *uploadRegistry) findIncomplete(target, hash string, length int64, temporary bool) *upload {
+	for _, u := range r.snapshot() {
+		if u.targetPath != target || u.sha256 != hash || u.temporary != temporary {
+			continue // These identity fields never change after publication.
+		}
+		u.mu.Lock()
+		if !u.deleted && !u.complete && u.targetPath == target && u.sha256 == hash &&
+			u.lengthKnown && u.length == length && u.temporary == temporary &&
+			time.Since(u.updatedAt) < uploadMaxAge {
+			return u
+		}
+		u.mu.Unlock()
+	}
+	return nil
 }
 
 // remove deletes an entry from the registry map. It does not touch disk.
@@ -137,34 +176,6 @@ func (u *upload) location() string {
 
 // ---- Startup / maintenance -------------------------------------------------
 
-// wipeUploadDir removes any partial uploads left over from a previous run.
-// In-memory state does not survive a restart, so the orphaned data is useless
-// and the draft requires the server to consider such uploads gone.
-//
-// It clears the directory's contents but does NOT remove the directory itself:
-// in restricted deployments (e.g. running as a non-root user whose parent
-// directory is not writable) the process can write inside an existing uploads
-// dir but cannot recreate it. It then verifies the dir is actually writable so
-// a misconfigured mount fails at boot rather than silently breaking every
-// upload (which previously surfaced as a request that hangs forever).
-func wipeUploadDir() {
-	if err := os.MkdirAll(uploadsDir, os.ModePerm); err != nil {
-		log.Fatalf("uploads directory %q is not usable: %v", uploadsDir, err)
-	}
-	entries, err := os.ReadDir(uploadsDir)
-	if err != nil {
-		log.Fatalf("cannot read uploads directory %q: %v", uploadsDir, err)
-	}
-	for _, e := range entries {
-		os.RemoveAll(filepath.Join(uploadsDir, e.Name()))
-	}
-	probe := filepath.Join(uploadsDir, ".write-probe")
-	if err := os.WriteFile(probe, nil, 0o644); err != nil {
-		log.Fatalf("uploads directory %q is not writable: %v", uploadsDir, err)
-	}
-	os.Remove(probe)
-}
-
 // startUploadJanitor periodically reclaims upload resources (including
 // completed tombstones) older than maxAge.
 func startUploadJanitor(r *uploadRegistry, maxAge time.Duration) {
@@ -172,24 +183,23 @@ func startUploadJanitor(r *uploadRegistry, maxAge time.Duration) {
 		ticker := time.NewTicker(maxAge / 4)
 		defer ticker.Stop()
 		for range ticker.C {
-			cutoff := time.Now().Add(-maxAge)
-			var stale []*upload
-			r.mu.Lock()
-			for id, u := range r.m {
-				if u.updatedAt.Before(cutoff) {
-					stale = append(stale, u)
-					delete(r.m, id)
-				}
-			}
-			r.mu.Unlock()
-			for _, u := range stale {
-				u.mu.Lock()
-				u.deleted = true
-				os.Remove(u.partialPath())
-				u.mu.Unlock()
-			}
+			r.expire(time.Now().Add(-maxAge))
 		}
 	}()
+}
+
+func (r *uploadRegistry) expire(cutoff time.Time) {
+	for _, u := range r.snapshot() {
+		if !u.mu.TryLock() {
+			continue // Never reclaim an active transfer.
+		}
+		if u.updatedAt.Before(cutoff) {
+			if err := u.discard(r); err != nil {
+				log.Printf("expiring upload %s: %v", u.id, err)
+			}
+		}
+		u.mu.Unlock()
+	}
 }
 
 // ---- Routing ---------------------------------------------------------------
@@ -270,13 +280,39 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u, err := registry.create(targetPath, length, lengthKnown)
+	hash := r.Header.Get("Upload-SHA256")
+	if hash != "" {
+		if !uploadHashPattern.MatchString(hash) || !lengthKnown || complete || r.ContentLength != 0 {
+			uploadsError.Add(1)
+			writeProblem(w, http.StatusBadRequest, "", "Upload-SHA256 requires a lowercase SHA-256 digest, Upload-Length, Upload-Complete: ?0 and an empty body")
+			return
+		}
+		registry.discoveryMu.Lock()
+		defer registry.discoveryMu.Unlock()
+		if u := registry.findIncomplete(targetPath, hash, length, temporary); u != nil {
+			defer u.mu.Unlock()
+			u.updatedAt = time.Now()
+			if err := u.persist(); err != nil {
+				uploadsError.Add(1)
+				writeProblem(w, http.StatusInternalServerError, "", "unable to save upload state")
+				return
+			}
+			w.Header().Set("Location", u.location())
+			w.Header().Set("Cache-Control", "no-store")
+			setUploadStateHeaders(w, u)
+			uploadsSuccess.Add(1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+	}
+
+	u, err := registry.create(targetPath, length, lengthKnown, temporary, hash)
 	if err != nil {
 		uploadsError.Add(1)
 		writeProblem(w, http.StatusInternalServerError, "", "unable to create upload")
 		return
 	}
-	u.temporary = temporary
+	defer u.mu.Unlock()
 	resumableCreated.Add(1)
 
 	// Best-effort 104 (Upload Resumption Supported) interim response so an
@@ -291,9 +327,6 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Stream whatever body was included into the partial file starting at 0.
-	u.mu.Lock()
-	defer u.mu.Unlock()
-
 	n, serverErr, copyErr := writePartialAt(u, 0, r.Body)
 	u.offset = n
 	u.updatedAt = time.Now()
@@ -303,18 +336,14 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 	// browser would hang). Drain the body so the request completes cleanly.
 	if serverErr != nil {
 		io.Copy(io.Discard, r.Body)
-		os.Remove(u.partialPath())
-		registry.remove(u.id)
-		u.deleted = true
+		u.discard(registry)
 		uploadsError.Add(1)
 		writeProblem(w, http.StatusInternalServerError, "", "unable to store upload data")
 		return
 	}
 
 	if u.lengthKnown && u.offset > u.length {
-		os.Remove(u.partialPath())
-		registry.remove(u.id)
-		u.deleted = true
+		u.discard(registry)
 		uploadsError.Add(1)
 		writeProblem(w, http.StatusBadRequest, problemInconsistentLen, "received more data than declared length")
 		return
@@ -325,7 +354,7 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 	if complete && copyErr == nil {
 		if err := finalizeUpload(u); err != nil {
 			uploadsError.Add(1)
-			writeProblem(w, http.StatusInternalServerError, "", "unable to finalize upload: "+err.Error())
+			writeFinalizeError(w, u, err)
 			return
 		}
 		uploadsSuccess.Add(1)
@@ -338,6 +367,12 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 
 	// Otherwise the upload stays open. Point the client at the upload resource
 	// so it can append the remaining data (spec §4.2.2).
+	if err := u.persist(); err != nil {
+		u.discard(registry)
+		uploadsError.Add(1)
+		writeProblem(w, http.StatusInternalServerError, "", "unable to save upload state")
+		return
+	}
 	uploadsSuccess.Add(1)
 	w.Header().Set("Location", u.location())
 	setUploadStateHeaders(w, u)
@@ -471,11 +506,15 @@ func appendToUpload(w http.ResponseWriter, r *http.Request, id string) {
 	}
 
 	if u.lengthKnown && u.offset > u.length {
-		os.Remove(u.partialPath())
-		registry.remove(u.id)
-		u.deleted = true
+		u.discard(registry)
 		uploadsError.Add(1)
 		writeProblem(w, http.StatusBadRequest, problemInconsistentLen, "received more data than declared length")
+		return
+	}
+
+	if err := u.persist(); err != nil {
+		uploadsError.Add(1)
+		writeProblem(w, http.StatusInternalServerError, "", "unable to save upload state")
 		return
 	}
 
@@ -496,7 +535,7 @@ func appendToUpload(w http.ResponseWriter, r *http.Request, id string) {
 		}
 		if err := finalizeUpload(u); err != nil {
 			uploadsError.Add(1)
-			writeProblem(w, http.StatusInternalServerError, "", "unable to finalize upload: "+err.Error())
+			writeFinalizeError(w, u, err)
 			return
 		}
 		uploadsSuccess.Add(1)
@@ -520,14 +559,12 @@ func cancelUpload(w http.ResponseWriter, r *http.Request, id string) {
 		http.NotFound(w, r)
 		return
 	}
-	// Remove from the registry first, then take the per-upload lock (which
-	// waits for any in-flight append to finish) before deleting the partial
-	// file. This avoids racing an append that is mid-copy.
-	registry.remove(id)
 	u.mu.Lock()
-	u.deleted = true
-	os.Remove(u.partialPath())
-	u.mu.Unlock()
+	defer u.mu.Unlock()
+	if err := u.discard(registry); err != nil {
+		writeProblem(w, http.StatusInternalServerError, "", "unable to cancel upload")
+		return
+	}
 	resumableCanceled.Add(1)
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -597,6 +634,28 @@ func writePartialAt(u *upload, off int64, src io.Reader) (n int64, serverErr, cl
 // finalizeUpload marks the upload complete and moves the assembled partial file
 // to its target path under filesDir. The caller must hold u.mu.
 func finalizeUpload(u *upload) error {
+	if u.lengthKnown && u.offset != u.length {
+		return errors.New("upload length does not match declared length")
+	}
+	if u.sha256 != "" {
+		f, err := os.Open(u.partialPath())
+		if err != nil {
+			return err
+		}
+		h := sha256.New()
+		_, err = io.Copy(h, f)
+		f.Close()
+		if err != nil {
+			return err
+		}
+		if hex.EncodeToString(h.Sum(nil)) != u.sha256 {
+			return errUploadHashMismatch
+		}
+		u.finalizing = true
+		if err := u.persist(); err != nil {
+			return err
+		}
+	}
 	fileActions.Lock()
 	defer fileActions.Unlock()
 	_, fullPath, ok := validateStoredTarget(u.targetPath)
@@ -611,12 +670,24 @@ func finalizeUpload(u *upload) error {
 		u.expiresAt = expiry.ExpiresAt.Unix()
 	}
 	u.complete = true
+	u.finalizing = false
 	if !u.lengthKnown {
 		u.length = u.offset
 		u.lengthKnown = true
 	}
 	u.updatedAt = time.Now()
-	return nil
+	return u.persist()
+}
+
+func writeFinalizeError(w http.ResponseWriter, u *upload, err error) {
+	if errors.Is(err, errUploadHashMismatch) {
+		if discardErr := u.discard(registry); discardErr != nil {
+			log.Printf("discarding upload with invalid hash: %v", discardErr)
+		}
+		writeProblem(w, http.StatusUnprocessableEntity, "", err.Error())
+		return
+	}
+	writeProblem(w, http.StatusInternalServerError, "", "unable to finalize upload: "+err.Error())
 }
 
 // validateStoredTarget re-validates a stored target path at finalize time.
@@ -635,6 +706,9 @@ func validateStoredTarget(target string) (string, string, bool) {
 // setUploadStateHeaders writes the Upload-Offset, Upload-Complete and (when
 // known) Upload-Length headers describing the upload's current state.
 func setUploadStateHeaders(w http.ResponseWriter, u *upload) {
+	if u.sha256 != "" {
+		w.Header().Set("Upload-SHA256", u.sha256)
+	}
 	if u.complete && u.expiresAt > 0 {
 		w.Header().Set("File-Expires-At", strconv.FormatInt(u.expiresAt, 10))
 	}

@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>{{.Title}}</title>
+<link rel="alternate" type="text/markdown" href="{{.CurrentPath}}">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3 1h6l4 4v10H3z' fill='none' stroke='%23888' stroke-width='1.2'/><path d='M9 1.2V5h3.8' fill='none' stroke='%23888' stroke-width='1.2'/></svg>">
 {{.ExtraHeaders | safeHTML}}
 <style>
@@ -616,6 +617,16 @@
     const PARTIAL_TYPE = 'application/partial-upload';
     const MAX_CONCURRENT = 3;
     const DISMISS_MS = 5000;
+    let hashWorkerURL = null;
+
+    function uploadOffset(xhr, min, max) {
+      const raw = xhr.getResponseHeader('Upload-Offset');
+      const offset = Number(raw);
+      if (!/^\d+$/.test(raw || '') || !Number.isSafeInteger(offset) || offset < min || offset > max) {
+        throw new Error('invalid upload offset');
+      }
+      return offset;
+    }
 
     const queue = [];
     let running = 0;
@@ -673,6 +684,10 @@
         this.offset = 0;
         this.loaded = 0;
         this.location = null;
+        this.sha256 = null;
+        this.hashLoaded = 0;
+        this.hashWorker = null;
+        this.hashReject = null;
         this.completed = false;
         this.canceled = false;
         this.status = 'queued';
@@ -717,6 +732,9 @@
             '<span>' + fmtBytes(this.loaded) + ' / ' + fmtBytes(this.size) + '</span>' +
             '<span>' + fmtBytes(this.speed) + '/s</span>' +
             (remain > 0 ? '<span>' + Math.ceil(remain) + 's left</span>' : '');
+        } else if (this.status === 'hashing') {
+          this.pctEl.textContent = 'preparing';
+          this.metaEl.textContent = 'Preparing file: ' + (this.size ? Math.floor(this.hashLoaded / this.size * 100) : 100) + '%';
         } else if (this.status === 'done') {
           this.pctEl.textContent = 'done';
           this.metaEl.innerHTML = '<span>' + fmtBytes(this.size) + '</span><span>uploaded</span>';
@@ -767,23 +785,57 @@
         });
       }
 
+      async hashFile() {
+        if (!hashWorkerURL) {
+          hashWorkerURL = URL.createObjectURL(new Blob([{{.UploadHashWorker}}], { type: 'text/javascript' }));
+        }
+        const worker = new Worker(hashWorkerURL);
+        this.hashWorker = worker;
+        try {
+          return await new Promise((resolve, reject) => {
+            this.hashReject = reject;
+            worker.onmessage = (event) => {
+              if (event.data.error) reject(new Error(event.data.error));
+              else if (event.data.hash) resolve(event.data.hash);
+              else {
+                this.hashLoaded = event.data.loaded;
+                this.render();
+              }
+            };
+            worker.onerror = () => reject(new Error('Unable to prepare file'));
+            worker.postMessage(this.file);
+          });
+        } finally {
+          worker.terminate();
+          this.hashWorker = null;
+          this.hashReject = null;
+        }
+      }
+
       async create() {
         const url = new URL(encodeURIComponent(this.name), window.location.href);
         if (this.temporary) url.searchParams.set('temporary', 'true');
         const xhr = await this.request('POST', url,
-          { 'Upload-Complete': '?0', 'Upload-Length': String(this.size) }, new Blob([]));
-        if (xhr.status !== 201) throw new Error('create failed (' + xhr.status + ')');
+          { 'Upload-Complete': '?0', 'Upload-Length': String(this.size), 'Upload-SHA256': this.sha256 }, new Blob([]));
+        if (xhr.status !== 201 && xhr.status !== 200) throw new Error('create failed (' + xhr.status + ')');
         const loc = xhr.getResponseHeader('Location');
-        if (!loc) throw new Error('no upload location');
+        if (!/^\/\.uploads\/[0-9a-f]{32}$/.test(loc || '')) throw new Error('invalid upload location');
+        if (xhr.getResponseHeader('Upload-SHA256') !== this.sha256) throw new Error('server did not confirm file hash');
+        this.offset = this.loaded = uploadOffset(xhr, 0, this.size);
         return loc;
       }
 
       async syncOffset() {
         const xhr = await this.request('HEAD', this.location, {}, null);
-        if (xhr.status === 404) throw new Error('upload expired');
+        if (xhr.status === 404 || xhr.status === 410) {
+          this.location = null;
+          this.offset = this.loaded = 0;
+          return;
+        }
+        if (xhr.status !== 204) throw new Error('resume failed (' + xhr.status + ')');
         this.expiresAt = Number(xhr.getResponseHeader('File-Expires-At') || 0);
-        const off = parseInt(xhr.getResponseHeader('Upload-Offset') || '', 10);
-        if (!isNaN(off)) { this.offset = off; this.loaded = off; }
+        const off = uploadOffset(xhr, 0, this.size);
+        this.offset = off; this.loaded = off;
         if (xhr.getResponseHeader('Upload-Complete') === '?1') this.completed = true;
       }
 
@@ -798,12 +850,17 @@
           .then((xhr) => {
             this.expiresAt = Number(xhr.getResponseHeader('File-Expires-At') || 0);
             if (xhr.status === 204 || xhr.status === 201) {
-              this.offset = end; this.loaded = end;
+              const off = uploadOffset(xhr, start, end);
+              this.offset = off; this.loaded = off;
               if (xhr.status === 201) this.completed = true;
             } else if (xhr.status === 409) {
-              const off = parseInt(xhr.getResponseHeader('Upload-Offset') || '', 10);
-              if (!isNaN(off)) { this.offset = off; this.loaded = off; }
+              const off = uploadOffset(xhr, 0, this.size);
+              this.offset = off; this.loaded = off;
               if (xhr.getResponseHeader('Upload-Complete') === '?1') this.completed = true;
+            } else if (xhr.status === 422) {
+              this.location = null;
+              this.offset = this.loaded = 0;
+              throw new Error('File verification failed. Retry to upload again.');
             } else {
               throw new Error('HTTP ' + xhr.status);
             }
@@ -813,9 +870,23 @@
       async run() {
         try {
           this.lastT = null; this.lastBytes = this.loaded; this.speed = 0;
+          if (!this.sha256) {
+            this.status = 'hashing'; this.render();
+            this.sha256 = await this.hashFile();
+          }
+          if (this.canceled) return;
+          // Deduplicate only after hashing: name, size and timestamps do not
+          // prove that two selections contain the same bytes.
+          const duplicate = Array.from(uploaders).some(u => u !== this && !u.completed && !u.canceled &&
+            u.status !== 'error' && u.sha256 === this.sha256 && u.name === this.name && u.temporary === this.temporary);
+          if (duplicate) { this.remove(); return; }
           this.status = this.location ? 'uploading' : 'starting'; this.render();
+          if (this.location) await this.syncOffset();
           if (!this.location) this.location = await this.create();
-          else await this.syncOffset();
+          if (this.canceled) {
+            if (this.location) fetch(this.location, { method: 'DELETE' }).catch(() => {});
+            return;
+          }
           if (this.completed) { this.finish(); return; }
           this.status = 'uploading';
           while (this.offset < this.size && !this.canceled && !this.completed) {
@@ -868,6 +939,8 @@
       cancel() {
         if (this.completed || this.status === 'canceled' || this.status === 'error') { this.remove(); return; }
         this.canceled = true; this.speed = 0;
+        if (this.hashWorker) this.hashWorker.terminate();
+        if (this.hashReject) this.hashReject(new Error('aborted'));
         if (this.xhr) this.xhr.abort();
         const i = queue.indexOf(this); if (i >= 0) queue.splice(i, 1);
         if (this.location) fetch(this.location, { method: 'DELETE' }).catch(() => {});

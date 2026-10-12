@@ -160,10 +160,9 @@ func main() {
 	startFileJanitor()
 
 	if enableUpload {
-		// Resumable uploads keep in-memory state only, so partials from a
-		// previous run are useless: wipe them and start a janitor to expire
-		// abandoned uploads.
-		wipeUploadDir()
+		if err := loadUploads(registry); err != nil {
+			log.Fatalf("Loading resumable uploads: %v", err)
+		}
 		startUploadJanitor(registry, uploadMaxAge)
 	}
 
@@ -280,11 +279,14 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 	fullPath := filepath.Join(filesDir, rel)
 	if info.IsDir() {
 		if !strings.HasSuffix(urlPath, "/") {
-			http.Redirect(w, r, urlPath+"/", http.StatusFound)
+			target := *r.URL
+			target.Path += "/"
+			target.RawPath = ""
+			http.Redirect(w, r, target.RequestURI(), http.StatusFound)
 			return
 		}
 		directoryLists.Add(1)
-		listDirectory(w, fullPath, urlPath)
+		listDirectory(w, r, fullPath, urlPath)
 	} else {
 		fileServes.Add(1)
 		w.Header().Set("Content-Disposition", fileDisposition(info.Name()))
@@ -319,7 +321,7 @@ func fileDisposition(name string) string {
 	return "attachment; filename=\"" + quoted + "\"; filename*=UTF-8''" + encoded
 }
 
-func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
+func listDirectory(w http.ResponseWriter, r *http.Request, dirPath string, urlPath string) {
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		http.Error(w, "Error reading directory", http.StatusInternalServerError)
@@ -343,6 +345,9 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 		}
 		info, err := entry.Info()
 		if err != nil {
+			continue
+		}
+		if !info.IsDir() && !info.Mode().IsRegular() {
 			continue
 		}
 
@@ -385,6 +390,18 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 		return fileInfos[i].Name < fileInfos[j].Name
 	})
 
+	w.Header().Add("Vary", "Accept")
+	w.Header().Add("Vary", "User-Agent")
+	w.Header().Add("Link", "<"+r.URL.EscapedPath()+">; rel=\"alternate\"; type=\"text/markdown\"")
+	if wantsMarkdown(r) {
+		writeMarkdownDirectory(w, r, urlPath, parentURL, fileInfos)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if r.Method == http.MethodHead {
+		return
+	}
+
 	tmpl := template.New("index").Funcs(template.FuncMap{
 		"safeHTML": func(s string) template.HTML {
 			return template.HTML(s)
@@ -400,15 +417,16 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 	breadcrumbs := buildBreadcrumbs(urlPath)
 
 	data := struct {
-		CurrentPath   string
-		ParentURL     string
-		Files         []FileInfo
-		Title         string
-		ExtraHeaders  string
-		GitCommit     string
-		BuildDate     string
-		DisableUpload bool
-		Breadcrumbs   []Crumb
+		CurrentPath      string
+		ParentURL        string
+		Files            []FileInfo
+		Title            string
+		ExtraHeaders     string
+		GitCommit        string
+		BuildDate        string
+		DisableUpload    bool
+		Breadcrumbs      []Crumb
+		UploadHashWorker string
 	}{
 		CurrentPath:   urlPath,
 		ParentURL:     parentURL,
@@ -419,6 +437,9 @@ func listDirectory(w http.ResponseWriter, dirPath string, urlPath string) {
 		BuildDate:     BuildDate,
 		DisableUpload: !enableUpload,
 		Breadcrumbs:   breadcrumbs,
+	}
+	if enableUpload {
+		data.UploadHashWorker = uploadHashLibrary + "\n" + uploadHashWorker
 	}
 
 	tmpl.Execute(w, data)
@@ -742,3 +763,9 @@ func buildBreadcrumbs(urlPath string) []Crumb {
 
 //go:embed template.html
 var htmlTemplate string
+
+//go:embed assets/js-sha256.min.js
+var uploadHashLibrary string
+
+//go:embed assets/upload-hash-worker.js
+var uploadHashWorker string
