@@ -29,10 +29,19 @@ volumes:
 
 # metrics
 
+Enable `/metrics` with `--enable-metrics` or `ENABLE_METRICS=true`. Metrics use the
+Prometheus Go client, retaining the `filebrowser_*` series and adding standard
+`go_*` runtime metrics for memory, goroutines, garbage collection, and Go version.
+The duration histogram uses 0.1, 0.5, and 1 second buckets, plus `+Inf`; the client
+formats the one-second bucket as `le="1"` in Prometheus text output (previously
+`le="1.0"`). Update queries that select that label exactly.
+
 - `filebrowser_info` - Build info
 - `filebrowser_uptime_seconds` - Uptime
 - `filebrowser_http_requests_total{status}` - HTTP requests
 - `filebrowser_uploads_total{status}` - Uploads
+- `filebrowser_resumable_uploads_total{event}` - Resumable upload activity
+- `filebrowser_http_request_duration_seconds{method}` - Request duration histogram
 - `filebrowser_operations_total{type}` - File operations
 - `filebrowser_memory_bytes{type}` - Memory usage
 - `filebrowser_goroutines` - Goroutines

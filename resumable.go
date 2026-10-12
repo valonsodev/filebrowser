@@ -28,6 +28,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/dunglas/httpsfv"
 )
 
 const (
@@ -259,7 +261,7 @@ func handleUploadCreation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	complete, ok := parseSFBool(r.Header.Get("Upload-Complete"))
+	complete, ok := parseSFBool(strings.Join(r.Header.Values("Upload-Complete"), ","))
 	if !ok {
 		uploadsError.Add(1)
 		writeProblem(w, http.StatusBadRequest, "", "invalid Upload-Complete header")
@@ -388,7 +390,7 @@ func creationLength(w http.ResponseWriter, r *http.Request, complete bool) (int6
 		fromContent = r.ContentLength
 	}
 
-	if h := r.Header.Get("Upload-Length"); h != "" {
+	if h := strings.Join(r.Header.Values("Upload-Length"), ","); h != "" {
 		ul, ok := parseSFInteger(h)
 		if !ok {
 			writeProblem(w, http.StatusBadRequest, "", "invalid Upload-Length header")
@@ -438,14 +440,14 @@ func appendToUpload(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	complete, ok := parseSFBool(r.Header.Get("Upload-Complete"))
+	complete, ok := parseSFBool(strings.Join(r.Header.Values("Upload-Complete"), ","))
 	if !ok {
 		uploadsError.Add(1)
 		writeProblem(w, http.StatusBadRequest, "", "invalid or missing Upload-Complete header")
 		return
 	}
 
-	reqOffset, ok := parseSFInteger(r.Header.Get("Upload-Offset"))
+	reqOffset, ok := parseSFInteger(strings.Join(r.Header.Values("Upload-Offset"), ","))
 	if !ok {
 		uploadsError.Add(1)
 		writeProblem(w, http.StatusBadRequest, "", "invalid or missing Upload-Offset header")
@@ -728,45 +730,30 @@ func mediaType(v string) string {
 	return strings.ToLower(strings.TrimSpace(v))
 }
 
-// ---- Structured Fields (minimal subset of RFC 8941) ------------------------
+// ---- Structured Fields -----------------------------------------------------
 
-// parseSFBool parses a Structured Fields Boolean. It accepts only the exact
-// tokens "?1" (true) and "?0" (false).
 func parseSFBool(v string) (bool, bool) {
-	switch strings.TrimSpace(v) {
-	case "?1":
-		return true, true
-	case "?0":
-		return false, true
-	default:
+	item, err := httpsfv.UnmarshalItem([]string{v})
+	if err != nil {
 		return false, false
 	}
+	value, ok := item.Value.(bool)
+	return value, ok
 }
 
 func formatSFBool(b bool) string {
-	if b {
-		return "?1"
-	}
-	return "?0"
+	// Both boolean values are always valid Structured Fields items.
+	value, _ := httpsfv.Marshal(httpsfv.NewItem(b))
+	return value
 }
 
-// parseSFInteger parses a non-negative Structured Fields Integer. It rejects
-// a leading '+', signs, decimals and empty values.
 func parseSFInteger(v string) (int64, bool) {
-	v = strings.TrimSpace(v)
-	if v == "" {
-		return 0, false
-	}
-	for _, c := range v {
-		if c < '0' || c > '9' {
-			return 0, false
-		}
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
+	item, err := httpsfv.UnmarshalItem([]string{v})
 	if err != nil {
 		return 0, false
 	}
-	return n, true
+	value, ok := item.Value.(int64)
+	return value, ok && value >= 0
 }
 
 // ---- Problem responses (RFC 9457) -----------------------------------------

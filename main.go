@@ -8,18 +8,15 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -57,63 +54,6 @@ var (
 	// Build information - set via ldflags during build
 	GitCommit = "unknown"
 	BuildDate = "unknown"
-	// Metrics
-	startTime           = time.Now()
-	httpRequestsTotal   atomic.Uint64
-	httpRequestsSuccess atomic.Uint64
-	httpRequestsError   atomic.Uint64
-	uploadsTotal        atomic.Uint64
-	uploadsSuccess      atomic.Uint64
-	uploadsError        atomic.Uint64
-	directoryLists      atomic.Uint64
-	fileServes          atomic.Uint64
-	// Resumable upload metrics (draft-ietf-httpbis-resumable-upload-11)
-	resumableCreated   atomic.Uint64
-	resumableCompleted atomic.Uint64
-	resumableCanceled  atomic.Uint64
-	resumableAppends   atomic.Uint64
-
-	requestDurationBuckets = map[string]map[string]*atomic.Uint64{
-		"DELETE": {"0.1": &atomic.Uint64{}, "0.5": &atomic.Uint64{}, "1.0": &atomic.Uint64{}, "+Inf": &atomic.Uint64{}},
-		"GET": {
-			"0.1":  &atomic.Uint64{},
-			"0.5":  &atomic.Uint64{},
-			"1.0":  &atomic.Uint64{},
-			"+Inf": &atomic.Uint64{},
-		},
-		"PUT": {
-			"0.1":  &atomic.Uint64{},
-			"0.5":  &atomic.Uint64{},
-			"1.0":  &atomic.Uint64{},
-			"+Inf": &atomic.Uint64{},
-		},
-		"POST": {
-			"0.1":  &atomic.Uint64{},
-			"0.5":  &atomic.Uint64{},
-			"1.0":  &atomic.Uint64{},
-			"+Inf": &atomic.Uint64{},
-		},
-		"PATCH": {
-			"0.1":  &atomic.Uint64{},
-			"0.5":  &atomic.Uint64{},
-			"1.0":  &atomic.Uint64{},
-			"+Inf": &atomic.Uint64{},
-		},
-	}
-	requestDurationSum = map[string]*atomic.Uint64{
-		"DELETE": &atomic.Uint64{},
-		"GET":    &atomic.Uint64{},
-		"PUT":    &atomic.Uint64{},
-		"POST":   &atomic.Uint64{},
-		"PATCH":  &atomic.Uint64{},
-	}
-	requestDurationCount = map[string]*atomic.Uint64{
-		"DELETE": &atomic.Uint64{},
-		"GET":    &atomic.Uint64{},
-		"PUT":    &atomic.Uint64{},
-		"POST":   &atomic.Uint64{},
-		"PATCH":  &atomic.Uint64{},
-	}
 )
 
 func main() {
@@ -510,119 +450,6 @@ func handlePutUpload(w http.ResponseWriter, r *http.Request) {
 	httpRequestsSuccess.Add(1)
 	w.WriteHeader(http.StatusCreated)
 	fmt.Fprintf(w, "File uploaded successfully to %s\n", urlPath)
-}
-
-func recordRequestDuration(method string, duration float64) {
-	buckets, exists := requestDurationBuckets[method]
-	if !exists {
-		return
-	}
-
-	requestDurationCount[method].Add(1)
-	durationMicros := uint64(duration * 1_000_000)
-	requestDurationSum[method].Add(durationMicros)
-
-	bucketThresholds := []string{"0.1", "0.5", "1.0", "+Inf"}
-	thresholds := []float64{0.1, 0.5, 1.0, math.Inf(1)}
-
-	for i, threshold := range thresholds {
-		if duration <= threshold {
-			buckets[bucketThresholds[i]].Add(1)
-		}
-	}
-}
-
-func metricsHandler(w http.ResponseWriter, r *http.Request) {
-	if !enableMetrics {
-		http.Error(w, "Metrics are disabled", http.StatusForbidden)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	uptime := time.Since(startTime).Seconds()
-
-	fmt.Fprintf(w, "# HELP filebrowser_info Information about the file browser\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_info gauge\n")
-	fmt.Fprintf(w, "filebrowser_info{version=\"%s\",build_date=\"%s\"} 1\n", GitCommit, BuildDate)
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_uptime_seconds Total uptime in seconds\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_uptime_seconds gauge\n")
-	fmt.Fprintf(w, "filebrowser_uptime_seconds %.2f\n", uptime)
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_http_requests_total Total number of HTTP requests\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_http_requests_total counter\n")
-	fmt.Fprintf(w, "filebrowser_http_requests_total{status=\"total\"} %d\n", httpRequestsTotal.Load())
-	fmt.Fprintf(w, "filebrowser_http_requests_total{status=\"success\"} %d\n", httpRequestsSuccess.Load())
-	fmt.Fprintf(w, "filebrowser_http_requests_total{status=\"error\"} %d\n", httpRequestsError.Load())
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_uploads_total Total number of file uploads\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_uploads_total counter\n")
-	fmt.Fprintf(w, "filebrowser_uploads_total{status=\"total\"} %d\n", uploadsTotal.Load())
-	fmt.Fprintf(w, "filebrowser_uploads_total{status=\"success\"} %d\n", uploadsSuccess.Load())
-	fmt.Fprintf(w, "filebrowser_uploads_total{status=\"error\"} %d\n", uploadsError.Load())
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_resumable_uploads_total Resumable upload activity\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_resumable_uploads_total counter\n")
-	fmt.Fprintf(w, "filebrowser_resumable_uploads_total{event=\"created\"} %d\n", resumableCreated.Load())
-	fmt.Fprintf(w, "filebrowser_resumable_uploads_total{event=\"completed\"} %d\n", resumableCompleted.Load())
-	fmt.Fprintf(w, "filebrowser_resumable_uploads_total{event=\"canceled\"} %d\n", resumableCanceled.Load())
-	fmt.Fprintf(w, "filebrowser_resumable_uploads_total{event=\"append\"} %d\n", resumableAppends.Load())
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_operations_total Total number of file operations\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_operations_total counter\n")
-	fmt.Fprintf(w, "filebrowser_operations_total{type=\"directory_list\"} %d\n", directoryLists.Load())
-	fmt.Fprintf(w, "filebrowser_operations_total{type=\"file_serve\"} %d\n", fileServes.Load())
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_http_request_duration_seconds HTTP request duration in seconds\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_http_request_duration_seconds histogram\n")
-
-	for method, buckets := range requestDurationBuckets {
-		for bucket, count := range buckets {
-			fmt.Fprintf(w, "filebrowser_http_request_duration_seconds_bucket{le=\"%s\",method=\"%s\"} %d\n", bucket, method, count.Load())
-		}
-
-		sumMicros := requestDurationSum[method].Load()
-		sumSeconds := float64(sumMicros) / 1_000_000
-		fmt.Fprintf(w, "filebrowser_http_request_duration_seconds_sum{method=\"%s\"} %.6f\n", method, sumSeconds)
-		fmt.Fprintf(w, "filebrowser_http_request_duration_seconds_count{method=\"%s\"} %d\n", method, requestDurationCount[method].Load())
-	}
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_memory_bytes Memory usage in bytes\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_memory_bytes gauge\n")
-	fmt.Fprintf(w, "filebrowser_memory_bytes{type=\"alloc\"} %d\n", m.Alloc)
-	fmt.Fprintf(w, "filebrowser_memory_bytes{type=\"sys\"} %d\n", m.Sys)
-	fmt.Fprintf(w, "filebrowser_memory_bytes{type=\"heap_alloc\"} %d\n", m.HeapAlloc)
-	fmt.Fprintf(w, "filebrowser_memory_bytes{type=\"heap_sys\"} %d\n", m.HeapSys)
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_goroutines Current number of goroutines\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_goroutines gauge\n")
-	fmt.Fprintf(w, "filebrowser_goroutines %d\n", runtime.NumGoroutine())
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_gc_total Total number of garbage collections\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_gc_total counter\n")
-	fmt.Fprintf(w, "filebrowser_gc_total %d\n", m.NumGC)
-	fmt.Fprintf(w, "\n")
-
-	fmt.Fprintf(w, "# HELP filebrowser_config Configuration settings\n")
-	fmt.Fprintf(w, "# TYPE filebrowser_config gauge\n")
-	if enableUpload {
-		fmt.Fprintf(w, "filebrowser_config{setting=\"uploads_enabled\"} 1\n")
-	} else {
-		fmt.Fprintf(w, "filebrowser_config{setting=\"uploads_disabled\"} 1\n")
-	}
 }
 
 // ---- Directory size estimation (cached) ----
