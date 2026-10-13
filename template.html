@@ -1003,12 +1003,30 @@
     if (pasteBtn) {
       pasteBtn.addEventListener('click', function() { uploadText(pasteInput.value); pasteInput.value = ''; });
     }
+    function pasteName(f) {
+      // Browsers name clipboard images generically (e.g. "image.png"); make them unique.
+      const m = /^image\.(\w+)$/.exec(f.name);
+      if (!m) return f;
+      const name = 'paste-' + nowStamp().slice(0, 10) + '-' + String(Date.now()).slice(-6) + '.' + m[1];
+      return new File([f], name, { type: f.type, lastModified: f.lastModified });
+    }
     document.addEventListener('paste', function(e) {
-      if (!fileInput) return;
+      if (!fileInput || !e.clipboardData) return;
       const ae = document.activeElement;
-      if (ae && (ae.id === 'paste-input' || ae.id === 'search' || ae.id === 'folder-name')) return;
-      const text = e.clipboardData && e.clipboardData.getData('text/plain');
-      if (text) uploadText(text);
+      const text = e.clipboardData.getData('text/plain');
+      const files = Array.from(e.clipboardData.files || []);
+      // Let the filter and folder name fields receive text pastes normally.
+      if (ae && (ae.id === 'search' || ae.id === 'folder-name') && (text || files.length === 0)) return;
+      if (files.length > 0) {
+        e.preventDefault();
+        enqueueFiles(files.map(pasteName));
+        return;
+      }
+      if (!text || !pasteInput || ae === pasteInput) return;
+      e.preventDefault();
+      pasteInput.focus();
+      pasteInput.setRangeText(text, pasteInput.selectionStart, pasteInput.selectionEnd, 'end');
+      pasteInput.dispatchEvent(new Event('input', { bubbles: true }));
     });
 
     // ---- drag & drop ----
