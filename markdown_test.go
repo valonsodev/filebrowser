@@ -58,7 +58,7 @@ func TestDirectoryRepresentationNegotiation(t *testing.T) {
 				if !strings.Contains(body, "[document.pdf](<http://files.example/document.pdf>)") {
 					t.Fatal("missing file link", body)
 				}
-				for _, unwanted := range []string{"<script", "<style", "XMLHttpRequest", "Upload", "Delete", "curl "} {
+				for _, unwanted := range []string{"<script", "<style", "XMLHttpRequest", "Delete"} {
 					if strings.Contains(body, unwanted) {
 						t.Fatal("directory includes controls or example", unwanted)
 					}
@@ -171,5 +171,27 @@ func TestDirectoryRedirectKeepsQuery(t *testing.T) {
 	w := securityRequest("GET", "/folder?existing=value", nil, nil)
 	if w.Code != 302 || w.Header().Get("Location") != "/folder/?existing=value" {
 		t.Fatal("directory redirect lost query", w.Code, w.Header())
+	}
+}
+
+func TestDirectoryCurlUploadExample(t *testing.T) {
+	securityWorkspace(t)
+	if err := os.Mkdir(filepath.Join(filesDir, "my folder"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true, false} {
+		enableUpload = enabled
+		for _, accept := range []string{"text/html", "text/markdown"} {
+			w := securityRequest("GET", "/my%20folder/", nil, map[string]string{
+				"Accept": accept, "X-Forwarded-Proto": "https",
+			})
+			body := w.Body.String()
+			if w.Code != 200 || strings.Contains(body, "curl -T file.txt") != enabled {
+				t.Fatalf("enabled=%v accept=%s: %d %s", enabled, accept, w.Code, body)
+			}
+			if enabled && !strings.Contains(body, "https://files.example/my%20folder/file.txt") {
+				t.Fatal("upload example does not target the current directory", body)
+			}
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -230,6 +231,10 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 	} else {
 		fileServes.Add(1)
 		w.Header().Set("Content-Disposition", fileDisposition(info.Name()))
+		if contentType := previewContentType(info.Name()); contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+			w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'")
+		}
 		if !info.Mode().IsRegular() {
 			httpRequestsError.Add(1)
 			http.Error(w, "Only regular files can be served", http.StatusForbidden)
@@ -244,7 +249,20 @@ func pathHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func previewContentType(name string) string {
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+	mediaType, _, _ := mime.ParseMediaType(contentType)
+	if mediaType == "application/pdf" || mediaType == "text/plain" || strings.HasPrefix(mediaType, "image/") {
+		return contentType
+	}
+	return ""
+}
+
 func fileDisposition(name string) string {
+	disposition := "attachment"
+	if previewContentType(name) != "" {
+		disposition = "inline"
+	}
 	// Keep a plain filename for curl and an encoded filename for browsers.
 	// Strip control characters so filesystem names cannot inject HTTP headers.
 	name = strings.Map(func(r rune) rune {
@@ -258,7 +276,7 @@ func fileDisposition(name string) string {
 	}
 	quoted := strings.NewReplacer("\\", "\\\\", "\"", "\\\"").Replace(name)
 	encoded := strings.ReplaceAll(url.QueryEscape(name), "+", "%20")
-	return "attachment; filename=\"" + quoted + "\"; filename*=UTF-8''" + encoded
+	return disposition + "; filename=\"" + quoted + "\"; filename*=UTF-8''" + encoded
 }
 
 func listDirectory(w http.ResponseWriter, r *http.Request, dirPath string, urlPath string) {
@@ -357,16 +375,17 @@ func listDirectory(w http.ResponseWriter, r *http.Request, dirPath string, urlPa
 	breadcrumbs := buildBreadcrumbs(urlPath)
 
 	data := struct {
-		CurrentPath      string
-		ParentURL        string
-		Files            []FileInfo
-		Title            string
-		ExtraHeaders     string
-		GitCommit        string
-		BuildDate        string
-		DisableUpload    bool
-		Breadcrumbs      []Crumb
-		UploadHashWorker string
+		CurrentPath       string
+		ParentURL         string
+		Files             []FileInfo
+		Title             string
+		ExtraHeaders      string
+		GitCommit         string
+		BuildDate         string
+		DisableUpload     bool
+		Breadcrumbs       []Crumb
+		UploadHashWorker  string
+		CurlUploadExample string
 	}{
 		CurrentPath:   urlPath,
 		ParentURL:     parentURL,
@@ -379,6 +398,7 @@ func listDirectory(w http.ResponseWriter, r *http.Request, dirPath string, urlPa
 		Breadcrumbs:   breadcrumbs,
 	}
 	if enableUpload {
+		data.CurlUploadExample = curlUploadExample(r, urlPath)
 		data.UploadHashWorker = uploadHashLibrary + "\n" + uploadHashWorker
 	}
 

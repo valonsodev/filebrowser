@@ -224,7 +224,7 @@
   thead th .arrow { color: var(--muted); font-weight: 400; }
   tbody td { padding: 8px 16px; border-bottom: 1px solid var(--line); vertical-align: middle; }
   tbody tr:hover { background: var(--hover); }
-  td.c-name { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  td.c-name .name-content { display: flex; align-items: center; gap: 9px; min-width: 0; }
   td.c-name .ico { color: var(--muted); display: flex; flex: 0 0 auto; }
   td.c-name a {
     color: var(--fg);
@@ -270,7 +270,9 @@
     border-top: 1px solid var(--line);
     z-index: 20;
   }
-  .statusbar .right { margin-left: auto; display: flex; align-items: center; gap: 14px; }
+  .statusbar .build-info { flex-shrink: 0; }
+  .statusbar .curl-example { margin-left: 14px; min-width: 0; overflow-x: auto; white-space: nowrap; color: var(--fg); }
+  .statusbar .right { flex-shrink: 0; margin-left: auto; display: flex; align-items: center; gap: 14px; }
   .statusbar .upl-summary { color: var(--fg); font-variant-numeric: tabular-nums; }
   .statusbar .upl-summary:empty { display: none; }
   .theme-toggle {
@@ -353,7 +355,7 @@
     <tbody id="filelist">
       {{if ne .CurrentPath "/"}}
       <tr class="filerow parent">
-        <td class="c-name"><span class="ico">{{template "icoDir"}}</span><a href="{{.ParentURL}}">..</a></td>
+        <td class="c-name"><div class="name-content"><span class="ico">{{template "icoDir"}}</span><a href="{{.ParentURL}}">..</a></div></td>
         <td class="c-size">-</td>
         <td class="c-date">-</td>
         {{if not .DisableUpload}}<td class="c-actions"></td>{{end}}
@@ -361,7 +363,7 @@
       {{end}}
       {{range .Files}}
       <tr class="filerow"{{if .IsDir}} data-dir="1"{{end}} data-name="{{.Name}}" data-size="{{.SizeBytes}}" data-mtime="{{.ModUnix}}" data-expires="{{.ExpiresUnix}}">
-        <td class="c-name"><span class="ico">{{if .IsDir}}{{template "icoDir"}}{{else}}{{template "icoFile"}}{{end}}</span><a href="{{.URL}}">{{.Name}}{{if .IsDir}}/{{end}}</a></td>
+        <td class="c-name"><div class="name-content"><span class="ico">{{if .IsDir}}{{template "icoDir"}}{{else}}{{template "icoFile"}}{{end}}</span><a href="{{.URL}}"{{if not .IsDir}} target="_blank" rel="noopener noreferrer"{{end}}>{{.Name}}{{if .IsDir}}/{{end}}</a></div></td>
         <td class="c-size">{{.Size}}</td>
         <td class="c-date">{{.LastModified}}</td>
         {{if not $.DisableUpload}}<td class="c-actions">
@@ -376,7 +378,8 @@
   </table>
 
   <div class="statusbar">
-    <span>Build: {{.GitCommit}} | {{.BuildDate}}</span>
+    <span class="build-info">Build: {{.GitCommit}} | {{.BuildDate}}</span>
+    {{if not .DisableUpload}}<code class="curl-example" aria-label="Upload a file with curl">{{.CurlUploadExample}}</code>{{end}}
     <span class="right">
       <span class="upl-summary" id="status-uploads"></span>
       <span class="theme-toggle" id="theme-toggle" title="Toggle theme"></span>
@@ -473,8 +476,10 @@
       tr.dataset.mtime = String(mtime);
       const c1 = document.createElement('td'); c1.className = 'c-name';
       const ico = document.createElement('span'); ico.className = 'ico'; ico.innerHTML = fileIco;
-      const a = document.createElement('a'); a.href = encodeURIComponent(name); a.textContent = name;
-      c1.append(ico, a);
+      const a = document.createElement('a'); a.href = encodeURIComponent(name); a.textContent = name; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      const nameContent = document.createElement('div'); nameContent.className = 'name-content';
+      nameContent.append(ico, a);
+      c1.appendChild(nameContent);
       const c2 = document.createElement('td'); c2.className = 'c-size'; c2.textContent = fmtBytes(size);
       const c3 = document.createElement('td'); c3.className = 'c-date'; c3.textContent = dateStr;
       tr.append(c1, c2, c3);
@@ -544,6 +549,8 @@
           tr.dataset.dir = '1';
           const link = tr.querySelector('.c-name a');
           link.href = target.pathname;
+          link.removeAttribute('target');
+          link.removeAttribute('rel');
           link.textContent = name + '/';
           tr.querySelector('.ico').innerHTML = document.getElementById('ico-dir').innerHTML;
           tr.querySelector('.c-actions').replaceChildren();

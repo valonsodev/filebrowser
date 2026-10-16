@@ -294,7 +294,11 @@ func TestFilenameHeadersCannotInjectHeaders(t *testing.T) {
 			t.Fatalf("unsafe header: %q", header)
 		}
 		disposition, params, err := mime.ParseMediaType(header)
-		if err != nil || disposition != "attachment" || params["filename"] == "" {
+		wantDisposition := "attachment"
+		if previewContentType(name) != "" {
+			wantDisposition = "inline"
+		}
+		if err != nil || disposition != wantDisposition || params["filename"] == "" {
 			t.Fatalf("invalid disposition %q: %v", header, err)
 		}
 		if _, ok := params["evil"]; ok {
@@ -517,5 +521,32 @@ func TestTemporaryUploadRequiresDurableExpiry(t *testing.T) {
 	}
 	if len(fileActions.expirations) != 0 {
 		t.Fatal("failed upload left an in-memory expiry")
+	}
+}
+
+func TestPreviewFileResponses(t *testing.T) {
+	securityWorkspace(t)
+	for _, tc := range []struct{ name, contentType string }{
+		{"document.pdf", "application/pdf"},
+		{"notes.txt", "text/plain"},
+		{"photo.PNG", "image/png"},
+		{"photo.jpg", "image/jpeg"},
+		{"drawing.svg", "image/svg+xml"},
+	} {
+		securityWrite(t, tc.name, "<script>alert(1)</script>")
+		for _, method := range []string{"GET", "HEAD"} {
+			w := securityRequest(method, "/"+tc.name, nil, nil)
+			disposition, _, err := mime.ParseMediaType(w.Header().Get("Content-Disposition"))
+			if w.Code != 200 || err != nil || disposition != "inline" ||
+				!strings.HasPrefix(w.Header().Get("Content-Type"), tc.contentType) ||
+				w.Header().Get("X-Content-Type-Options") != "nosniff" ||
+				!strings.Contains(w.Header().Get("Content-Security-Policy"), "sandbox") {
+				t.Fatalf("%s %s: %d %v", method, tc.name, w.Code, w.Header())
+			}
+		}
+	}
+	page := securityRequest("GET", "/", nil, nil).Body.String()
+	if !strings.Contains(page, `href="./document.pdf" target="_blank" rel="noopener noreferrer"`) {
+		t.Fatal("preview link does not open in a new tab")
 	}
 }

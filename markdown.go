@@ -89,6 +89,11 @@ func listingURL(r *http.Request, path string) string {
 	return (&url.URL{Scheme: scheme, Host: r.Host, Path: path}).String()
 }
 
+func curlUploadExample(r *http.Request, path string) string {
+	target := listingURL(r, path+"file.txt")
+	return "curl -T file.txt '" + strings.ReplaceAll(target, "'", "'\"'\"'") + "'"
+}
+
 func writeMarkdownDirectory(w http.ResponseWriter, r *http.Request, path, parent string, files []FileInfo) {
 	var out strings.Builder
 	fmt.Fprintf(&out, "# %s\n\nDirectory: %s\n\n", markdownText(title), markdownText(path))
@@ -113,6 +118,9 @@ func writeMarkdownDirectory(w http.ResponseWriter, r *http.Request, path, parent
 				markdownText(name), listingURL(r, target), kind, file.Size,
 				time.Unix(file.ModUnix, 0).UTC().Format(time.RFC3339), expires)
 		}
+	}
+	if enableUpload {
+		fmt.Fprintf(&out, "\n## Upload a file\n\n```sh\n%s\n```\n", curlUploadExample(r, path))
 	}
 	body := out.String()
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
