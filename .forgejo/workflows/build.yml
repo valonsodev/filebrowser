@@ -18,7 +18,7 @@ jobs:
 
       - name: Build runner image
         run: |
-          docker build -t git.fran.cam/homelab/filebrowser:latest .
+          docker build --build-arg GIT_COMMIT="${GITHUB_SHA}" -t git.fran.cam/homelab/filebrowser:latest .
 
       - name: Login to registry
         if: github.event_name == 'push'

@@ -1,0 +1,32 @@
+[package]
+name = "filebrowser"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99.1"
+build = "build.rs"
+
+[dependencies]
+askama = { version = "0.16", default-features = false, features = ["derive", "std"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+chrono = { version = "0.4", features = ["serde"] }
+futures-util = "0.3"
+getrandom = "0.4"
+hex = "0.4"
+httpdate = "1"
+http-body = "1"
+mime_guess = "2"
+percent-encoding = "2"
+prometheus = { version = "0.14", default-features = false, features = ["process"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sfv = "0.14"
+sha2 = "0.11"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-stream = "0.1"
+tokio-util = { version = "0.7", features = ["io"] }
+url = "2"
+
+[profile.release]
+lto = "thin"
+strip = true

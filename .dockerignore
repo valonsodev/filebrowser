@@ -1,0 +1,11 @@
+# Send only build inputs; keep runtime data, binaries, VCS, and secrets out.
+**
+!Cargo.toml
+!Cargo.lock
+!build.rs
+!src/
+!src/**
+!templates/
+!templates/**
+!assets/
+!assets/**

@@ -3,10 +3,10 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>{{.Title}}</title>
-<link rel="alternate" type="text/markdown" href="{{.CurrentPath}}">
+<title>{{ title }}</title>
+<link rel="alternate" type="text/markdown" href="{{ current_path }}">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><path d='M3 1h6l4 4v10H3z' fill='none' stroke='%23888' stroke-width='1.2'/><path d='M9 1.2V5h3.8' fill='none' stroke='%23888' stroke-width='1.2'/></svg>">
-{{.ExtraHeaders | safeHTML}}
+{{ extra_headers |safe }}
 <style>
   :root {
     --bg: #1e1e1e;
@@ -54,7 +54,7 @@
     font-size: 26px;
     font-weight: 700;
     color: var(--fg-strong);
-    margin: 2px 0 14px;
+    margin: 2px 0 0;
     word-break: break-all;
   }
   h1.root a { color: var(--fg-strong); text-decoration: none; }
@@ -82,9 +82,6 @@
   .row-controls { display: flex; gap: 8px; margin-bottom: 8px; }
   .row-controls.paste-row { align-items: flex-start; }
   .row-controls .grow { flex: 1; min-width: 0; }
-  #folder-status { color: var(--muted); margin-bottom: 8px; font-size: 12px; }
-  #folder-status:empty { display: none; }
-  #folder-name[aria-invalid="true"] { border-color: #e66; }
   .btn {
     background: var(--field);
     color: var(--fg);
@@ -113,6 +110,28 @@
   }
   .filepick:hover { border-color: #555; }
   .filepick input[type=file] { display: none; }
+
+  html { scrollbar-gutter: stable; }
+  .toolbar { display: flex; flex-direction: column; gap: 8px; }
+  .file-tools { display: flex; align-items: stretch; gap: 8px; min-width: 0; }
+  .search-control { position: relative; flex: 0 0 38px; min-width: 0; overflow: hidden; transition: flex-basis .2s ease; }
+  .search-control:focus-within, .search-control.has-query { flex-basis: clamp(140px, 30vw, 300px); }
+  .search-control > svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+  #search { height: 100%; padding-left: 35px; padding-right: 8px; cursor: pointer; }
+  .search-control:not(:focus-within):not(.has-query) #search { color: transparent; caret-color: transparent; }
+  .search-control:not(:focus-within):not(.has-query) #search::placeholder { color: transparent; }
+  .search-control:focus-within #search, .search-control.has-query #search { cursor: text; }
+  #filepick-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+  .composer textarea { height: 84px; min-height: 84px; }
+  .composer textarea[aria-invalid="true"] { border-color: #e66; }
+  .composer-actions { display: grid; grid-template-rows: 1fr 1fr; gap: 8px; }
+  .temporary-toggle { position: relative; display: flex; align-items: center; justify-content: center; flex: 0 0 30px; color: var(--muted); cursor: pointer; border: 0; outline: none; background: none; }
+  .temporary-toggle input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; outline: none; }
+  .temporary-toggle svg { pointer-events: none; }
+  .temporary-toggle:has(input:checked) { color: var(--fg-strong); }
+  .table-heading { padding: 14px 16px 0; }
+  @media (prefers-reduced-motion: reduce) { .search-control { transition: none; } }
 
   /* ---- Uploads in progress ---- */
   #uploads { padding: 0 16px; }
@@ -208,7 +227,7 @@
   .u-resume:hover { border-color: #555; }
 
   /* ---- File table ---- */
-  table { width: 100%; border-collapse: collapse; margin-top: 6px; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; overflow-anchor: none; }
   thead th {
     text-align: left;
     color: var(--fg-strong);
@@ -238,18 +257,21 @@
   :root[data-theme="light"] td.c-name a { text-decoration-color: rgba(0,0,0,0.35); }
   td.c-name a:hover { color: var(--fg-strong); text-decoration-color: var(--fg-strong); }
   td.c-size, td.c-date { color: var(--muted); white-space: nowrap; }
-  .temporary-toggle { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; }
-  .temporary-toggle input { margin: 0; accent-color: var(--fg-strong); }
-  .c-actions { width: 1%; white-space: nowrap; }
+  .c-actions { width: 284px; white-space: nowrap; }
   .file-actions { display: flex; flex-wrap: nowrap; align-items: center; gap: 10px; white-space: nowrap; }
   .file-actions .btn { padding: 4px 8px; font-size: 12px; }
   .file-actions .delete-file { color: #e66; }
-  .expiry { color: var(--muted); font-size: 12px; white-space: nowrap; }
-  .expiry:empty { display: none; }
-  #file-action-status { padding: 8px 16px; color: var(--muted); }
+  .copy-curl { min-width: calc(6ch + 18px); }
+  .expiry { width: 15ch; color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .expiry:empty { visibility: hidden; }
+  #file-action-status { position: fixed; left: 0; right: 0; bottom: 28px; padding: 8px 16px; color: var(--muted); background: var(--bg); pointer-events: none; }
   #file-action-status:empty { display: none; }
   @media (max-width: 640px) {
-    td.c-actions { padding: 8px; }
+    .c-actions { width: 188px; }
+    td.c-actions, th.c-actions { padding: 8px; }
+    .file-actions { gap: 6px; }
+    .expiry { width: 5ch; }
+    .expiry-prefix { display: none; }
   }
   tr.new-row td.c-name a { color: var(--fg-strong); }
   tr.flash { animation: flash 1.4s ease; }
@@ -298,7 +320,8 @@
     h1.root { font-size: 22px; }
     thead th.c-date, tbody td.c-date { display: none; }
     thead th.c-size, tbody td.c-size { width: 90px; text-align: right; }
-    .row-controls { flex-wrap: wrap; }
+    .search-control:focus-within, .search-control.has-query { flex-basis: min(40vw, 190px); }
+    .file-tools { gap: 6px; }
     .upl-head .agg { display: none; }
   }
   @media (max-width: 380px) {
@@ -308,40 +331,41 @@
 </head>
 <body>
   <div class="wrap">
-    <h1 class="root">{{range .Breadcrumbs}}<a href="{{.URL}}">{{.Label}}</a>{{end}}</h1>
-
-    <input class="field" id="search" type="text" placeholder="Filter by filename..." autocomplete="off" spellcheck="false" aria-label="Filter by filename">
-
-    {{if not .DisableUpload}}
-    <div class="row-controls" style="margin-top:8px;">
-      <label class="filepick" id="filepick">
-        <span id="filepick-label">Choose files...</span>
-        <input type="file" id="file-input" multiple>
-      </label>
-      <button class="btn" id="upload-btn">Upload</button>
+    <div class="toolbar">
+      <div class="file-tools">
+        <div class="search-control">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+          <input class="field" id="search" type="text" placeholder="Filter files…" autocomplete="off" spellcheck="false" aria-label="Filter by filename">
+        </div>
+        {% if !disable_upload %}
+        <label class="filepick" id="filepick">
+          <span id="filepick-label">Choose files...</span>
+          <input type="file" id="file-input" multiple>
+        </label>
+        <button class="btn" id="upload-btn" type="button">Upload</button>
+        <label class="temporary-toggle" title="Temporary uploads: delete files 5 minutes after completion">
+          <input id="temporary-uploads" type="checkbox" role="switch" aria-label="Temporary uploads (5 minutes)">
+          <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-timer preview-icon"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></svg>
+        </label>
+        {% endif %}
+      </div>
+      {% if !disable_upload %}
+      <form class="composer" id="folder-form" novalidate>
+        <textarea class="field" id="paste-input" rows="2" placeholder="Paste text or type a folder name…" aria-label="Text to upload or folder name" aria-describedby="file-action-status" autocomplete="off" spellcheck="false"></textarea>
+        <div class="composer-actions">
+          <button class="btn" id="paste-btn" type="button">Upload text</button>
+          <button class="btn" id="folder-btn" type="submit">Create folder</button>
+        </div>
+      </form>
+      {% endif %}
     </div>
-
-    <div class="row-controls paste-row">
-      <textarea class="field grow" id="paste-input" rows="1" placeholder="Paste or type text here..." autocomplete="off" spellcheck="false"></textarea>
-      <button class="btn" id="paste-btn">Upload text</button>
-    </div>
-    <div class="row-controls">
-      <label class="temporary-toggle" title="Applies to new file, text, and drag-and-drop uploads. Deletion starts after each upload finishes.">
-        <input id="temporary-uploads" type="checkbox" role="switch">
-        Temporary uploads (5 min)
-      </label>
-    </div>
-    <form class="row-controls" id="folder-form" novalidate>
-      <input class="field grow" id="folder-name" type="text" placeholder="Folder name..." aria-label="Folder name" aria-describedby="folder-status" autocomplete="off" spellcheck="false">
-      <button class="btn" id="folder-btn" type="submit">Create folder</button>
-    </form>
-    <div id="folder-status" role="status" aria-live="polite"></div>
-    {{end}}
   </div>
 
   <div id="uploads" aria-live="polite"></div>
-
-  <div id="file-action-status" role="status" aria-live="polite"></div>
+  <div id="file-action-status" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div class="table-heading">
+    <h1 class="root">{% for crumb in breadcrumbs %}<a href="{{ crumb.url }}">{{ crumb.label }}</a>{% endfor %}</h1>
+  </div>
 
   <table>
     <thead>
@@ -349,37 +373,38 @@
         <th class="c-name sortable" data-key="name">Name</th>
         <th class="c-size sortable" data-key="size">Size</th>
         <th class="c-date sortable" data-key="mtime">Last Modified</th>
-        {{if not .DisableUpload}}<th class="c-actions">Actions</th>{{end}}
+        <th class="c-actions">Actions</th>
       </tr>
     </thead>
     <tbody id="filelist">
-      {{if ne .CurrentPath "/"}}
+      {% if current_path != "/" %}
       <tr class="filerow parent">
-        <td class="c-name"><div class="name-content"><span class="ico">{{template "icoDir"}}</span><a href="{{.ParentURL}}">..</a></div></td>
+        <td class="c-name"><div class="name-content"><span class="ico"><svg width="15" height="16" viewBox="0 0 15 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1 3.5h4.6l1.3 1.6H14v8.4H1z" stroke="currentColor" stroke-width="1.1" fill="none"/></svg></span><a href="{{ parent_url }}">..</a></div></td>
         <td class="c-size">-</td>
         <td class="c-date">-</td>
-        {{if not .DisableUpload}}<td class="c-actions"></td>{{end}}
+        <td class="c-actions"></td>
       </tr>
-      {{end}}
-      {{range .Files}}
-      <tr class="filerow"{{if .IsDir}} data-dir="1"{{end}} data-name="{{.Name}}" data-size="{{.SizeBytes}}" data-mtime="{{.ModUnix}}" data-expires="{{.ExpiresUnix}}">
-        <td class="c-name"><div class="name-content"><span class="ico">{{if .IsDir}}{{template "icoDir"}}{{else}}{{template "icoFile"}}{{end}}</span><a href="{{.URL}}"{{if not .IsDir}} target="_blank" rel="noopener noreferrer"{{end}}>{{.Name}}{{if .IsDir}}/{{end}}</a></div></td>
-        <td class="c-size">{{.Size}}</td>
-        <td class="c-date">{{.LastModified}}</td>
-        {{if not $.DisableUpload}}<td class="c-actions">
-          {{if not .IsDir}}<div class="file-actions">
+      {% endif %}
+      {% for file in files %}
+      <tr class="filerow"{% if file.is_dir %} data-dir="1"{% endif %} data-name="{{ file.name }}" data-size="{{ file.size_bytes }}" data-mtime="{{ file.mod_unix }}" data-expires="{{ file.expires_unix }}">
+        <td class="c-name"><div class="name-content"><span class="ico">{% if file.is_dir %}<svg width="15" height="16" viewBox="0 0 15 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1 3.5h4.6l1.3 1.6H14v8.4H1z" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{% else %}<svg width="14" height="16" viewBox="0 0 14 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 1.5h6L12.5 6v8.5a0 0 0 0 1 0 0h-11V1.5z" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M7.5 1.7V6h4.3" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{% endif %}</span><a href="{{ file.url }}"{% if !file.is_dir %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ file.name }}{% if file.is_dir %}/{% endif %}</a></div></td>
+        <td class="c-size">{{ file.size }}</td>
+        <td class="c-date">{{ file.last_modified }}</td>
+        <td class="c-actions">
+          {% if !file.is_dir %}<div class="file-actions">
             <span class="expiry"></span>
-            <button class="btn delete-file" type="button">Delete</button>
-          </div>{{end}}
-        </td>{{end}}
+            <button class="btn copy-curl" type="button" title="Copy curl download command">Copy</button>
+            {% if !disable_upload %}<button class="btn delete-file" type="button">Delete</button>{% endif %}
+          </div>{% endif %}
+        </td>
       </tr>
-      {{end}}
+      {% endfor %}
     </tbody>
   </table>
 
   <div class="statusbar">
-    <span class="build-info">Build: {{.GitCommit}} | {{.BuildDate}}</span>
-    {{if not .DisableUpload}}<code class="curl-example" aria-label="Upload a file with curl">{{.CurlUploadExample}}</code>{{end}}
+    <span class="build-info">Build: {{ git_commit }} | {{ build_date }}</span>
+    {% if !disable_upload %}<code class="curl-example" aria-label="Upload a file with curl">{{ curl_upload_example }}</code>{% endif %}
     <span class="right">
       <span class="upl-summary" id="status-uploads"></span>
       <span class="theme-toggle" id="theme-toggle" title="Toggle theme"></span>
@@ -388,12 +413,17 @@
 
   <div id="drag-message" class="drag-msg"></div>
 
-  <template id="ico-file">{{template "icoFile"}}</template>
-  <template id="ico-dir">{{template "icoDir"}}</template>
+  <template id="ico-file"><svg width="14" height="16" viewBox="0 0 14 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 1.5h6L12.5 6v8.5a0 0 0 0 1 0 0h-11V1.5z" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M7.5 1.7V6h4.3" stroke="currentColor" stroke-width="1.1" fill="none"/></svg></template>
+  <template id="ico-dir"><svg width="15" height="16" viewBox="0 0 15 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1 3.5h4.6l1.3 1.6H14v8.4H1z" stroke="currentColor" stroke-width="1.1" fill="none"/></svg></template>
+
+  <template id="file-actions-template"><div class="file-actions">
+            <span class="expiry"></span>
+            <button class="btn copy-curl" type="button" title="Copy curl download command">Copy</button>
+            {% if !disable_upload %}<button class="btn delete-file" type="button">Delete</button>{% endif %}
+          </div></template>
 
   <script>
-    const currentPath = '{{.CurrentPath}}';
-    const canChangeFiles = {{not .DisableUpload}};
+    const currentPath = {{ current_path_js|safe }};
     const fileIco = document.getElementById('ico-file').innerHTML;
     const temporaryUploads = document.getElementById('temporary-uploads');
 
@@ -419,6 +449,7 @@
     const tbody = document.getElementById('filelist');
     const search = document.getElementById('search');
     search.addEventListener('input', function() {
+      search.parentElement.classList.toggle('has-query', Boolean(search.value));
       const q = search.value.trim().toLowerCase();
       for (const tr of tbody.children) {
         if (tr.classList.contains('parent')) continue;
@@ -426,6 +457,7 @@
         tr.classList.toggle('hidden', !!q && !name.includes(q));
       }
     });
+
 
     // ---- column sorting ----
     let sortKey = null, sortDir = 1;
@@ -483,11 +515,9 @@
       const c2 = document.createElement('td'); c2.className = 'c-size'; c2.textContent = fmtBytes(size);
       const c3 = document.createElement('td'); c3.className = 'c-date'; c3.textContent = dateStr;
       tr.append(c1, c2, c3);
-      if (canChangeFiles) {
-        const actions = document.createElement('td'); actions.className = 'c-actions';
-        actions.innerHTML = '<div class="file-actions"><span class="expiry"></span><button class="btn delete-file" type="button">Delete</button></div>';
-        tr.appendChild(actions);
-      }
+      const actions = document.createElement('td'); actions.className = 'c-actions';
+      actions.appendChild(document.getElementById('file-actions-template').content.cloneNode(true));
+      tr.appendChild(actions);
       return tr;
     }
     function addOrUpdateFile(name, size, expiresAt) {
@@ -513,38 +543,39 @@
       }
       tr.dataset.expires = String(expiresAt || 0);
       updateExpiry(tr);
+      search.dispatchEvent(new Event('input'));
     }
 
     // ---- file deletion and temporary files ----
     const actionStatus = document.getElementById('file-action-status');
     const folderForm = document.getElementById('folder-form');
     if (folderForm) {
-      const folderName = document.getElementById('folder-name');
+      const folderName = document.getElementById('paste-input');
       const folderButton = document.getElementById('folder-btn');
-      const folderStatus = document.getElementById('folder-status');
       folderName.addEventListener('input', function() {
         folderName.removeAttribute('aria-invalid');
-        folderStatus.textContent = '';
+        if (actionStatus.dataset.error === 'true') actionStatus.textContent = '';
       });
       folderForm.addEventListener('submit', async function(event) {
         event.preventDefault();
         if (folderButton.disabled) return;
         const name = folderName.value.trim();
         const reserved = name === '.filebrowser' || name === '.uploads';
-        if (!name || name === '.' || name === '..' || /[\/\\]/.test(name) || reserved) {
+        if (!name || name === '.' || name === '..' || /[\/\\\r\n]/.test(name) || reserved) {
           folderName.setAttribute('aria-invalid', 'true');
-          folderStatus.textContent = reserved ? 'That folder name is reserved. Choose another name.' : 'Enter a folder name without slashes; . and .. are not valid names.';
+          notifyAction(reserved ? 'That folder name is reserved. Choose another name.' : 'Enter a single folder name without slashes or line breaks; . and .. are not valid names.', true);
           folderName.focus();
           return;
         }
         folderButton.disabled = true;
         folderName.disabled = true;
-        folderStatus.textContent = 'Creating folder…';
+        document.getElementById('paste-btn').disabled = true;
+        notifyAction('Creating folder…');
         try {
           const target = new URL(encodeURIComponent(name) + '/', window.location.href);
           target.search = '?folder=true';
           const response = await fetch(target, { method: 'POST' });
-          if (!response.ok) throw new Error((await response.text()).trim());
+          if (!response.ok) throw new Error(await responseMessage(response));
           const tr = makeRow(name, 0, nowStamp(), Math.floor(Date.now() / 1000));
           tr.dataset.dir = '1';
           const link = tr.querySelector('.c-name a');
@@ -560,14 +591,15 @@
           search.dispatchEvent(new Event('input'));
           setTimeout(function() { tr.classList.remove('flash', 'new-row'); }, 1500);
           folderName.value = '';
-          folderStatus.textContent = 'Created "' + name + '".';
+          notifyAction('Created "' + name + '".');
         } catch (error) {
           folderName.setAttribute('aria-invalid', 'true');
-          folderStatus.textContent = error.message || 'Unable to create folder.';
+          notifyAction(error.message || 'Unable to create folder.', true);
         } finally {
           folderButton.disabled = false;
           folderName.disabled = false;
-          folderName.focus();
+          document.getElementById('paste-btn').disabled = false;
+          folderName.focus({ preventScroll: true });
         }
       });
     }
@@ -575,26 +607,94 @@
       const expires = Number(tr.dataset.expires || 0);
       const label = tr.querySelector('.expiry');
       if (!label) return;
-      if (!expires) { label.textContent = ''; return; }
+      if (!expires) { label.textContent = ''; label.removeAttribute('title'); label.removeAttribute('aria-label'); return; }
       const remaining = Math.max(0, expires - Math.floor(Date.now() / 1000));
-      label.textContent = remaining ? 'Deletes in ' + Math.floor(remaining / 60) + ':' + String(remaining % 60).padStart(2, '0') : 'Deleting…';
+      label.innerHTML = remaining ? '<span class="expiry-prefix">Deletes in </span>' + Math.floor(remaining / 60) + ':' + String(remaining % 60).padStart(2, '0') : 'Deleting…';
+      label.setAttribute('aria-label', label.textContent);
       label.title = 'Scheduled deletion: ' + new Date(expires * 1000).toLocaleString();
     }
+    async function responseMessage(response) {
+      const text = await response.text();
+      try { const problem = JSON.parse(text); return problem.detail || problem.title || text; }
+      catch (_) { return text; }
+    }
+    let noticeTimer;
+    function notifyAction(message, error) {
+      clearTimeout(noticeTimer);
+      actionStatus.textContent = message;
+      actionStatus.dataset.error = String(Boolean(error));
+      noticeTimer = setTimeout(function() { actionStatus.textContent = ''; }, error ? 7000 : 3500);
+    }
+    let scrollFloor = 0;
+    // Keep the current viewport in bounds while rows disappear below it.
+    // Reclaim the extra space as the user scrolls upward, rather than snapping
+    // the viewport upward when the document becomes shorter.
+    window.addEventListener('scroll', function() {
+      if (!scrollFloor) return;
+      const needed = window.scrollY + window.innerHeight;
+      if (needed < scrollFloor) {
+        scrollFloor = window.scrollY > 0 ? needed : 0;
+        document.body.style.minHeight = scrollFloor ? scrollFloor + 'px' : '';
+      }
+    }, { passive: true });
+    function preserveScrollPosition() {
+      if (window.scrollY > 0) {
+        scrollFloor = Math.max(scrollFloor, window.scrollY + window.innerHeight);
+        document.body.style.minHeight = scrollFloor + 'px';
+      }
+    }
+    function removeRow(tr) {
+      preserveScrollPosition();
+      tr.remove();
+    }
+    async function copyText(value) {
+      if (navigator.clipboard && window.isSecureContext) {
+        try { await navigator.clipboard.writeText(value); return; } catch (_) { /* Try the HTTP-compatible fallback. */ }
+      }
+      const active = document.activeElement;
+      const field = document.createElement('textarea');
+      field.value = value; field.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;';
+      document.body.appendChild(field); field.focus({ preventScroll: true }); field.select();
+      const copied = document.execCommand('copy');
+      field.remove();
+      if (active) active.focus({ preventScroll: true });
+      if (!copied) throw new Error('Clipboard access is unavailable.');
+    }
     tbody.addEventListener('click', async function(event) {
+      const copy = event.target.closest('.copy-curl');
+      if (copy) {
+        const tr = copy.closest('tr');
+        const url = tr.querySelector('.c-name a').href;
+        const command = "curl -fLOJ -- '" + url.replace(/'/g, "'\"'\"'") + "'";
+        try {
+          await copyText(command);
+          copy.textContent = 'Copied';
+          clearTimeout(copy.copyTimer);
+          copy.copyTimer = setTimeout(function() { copy.textContent = 'Copy'; }, 1800);
+          notifyAction('Copied download command for "' + tr.dataset.name + '".');
+        } catch (error) { notifyAction(error.message || 'Unable to copy download command.', true); }
+        return;
+      }
       const button = event.target.closest('.delete-file');
-      if (!button) return;
+      if (!button || button.disabled) return;
       const tr = button.closest('tr');
       const name = tr.dataset.name;
+      const target = tr.querySelector('.c-name a').href;
+      const marker = document.createComment('pending deletion');
       button.disabled = true;
-      actionStatus.textContent = '';
+      preserveScrollPosition();
+      tr.replaceWith(marker);
       try {
-        const response = await fetch(tr.querySelector('.c-name a').href, { method: 'DELETE' });
-        if (!response.ok) throw new Error(await response.text());
-        tr.remove();
-        actionStatus.textContent = 'Deleted "' + name + '".';
+        const response = await fetch(target, { method: 'DELETE' });
+        if (!response.ok) throw new Error(await responseMessage(response));
+        marker.remove();
+        notifyAction('Deleted "' + name + '".');
       } catch (error) {
-        actionStatus.textContent = 'Unable to delete "' + name + '": ' + error.message;
-      } finally { button.disabled = false; }
+        button.disabled = false;
+        marker.replaceWith(tr);
+        search.dispatchEvent(new Event('input'));
+        notifyAction('Unable to delete "' + name + '": ' + error.message, true);
+      }
     });
     let checkingExpirations = false;
     async function refreshExpirations() {
@@ -609,7 +709,7 @@
       try {
         for (const tr of due) {
           const response = await fetch(tr.querySelector('.c-name a').href, { method: 'HEAD', cache: 'no-store' });
-          if (response.status === 404) tr.remove();
+          if (response.status === 404) removeRow(tr);
         }
       } catch (_) { /* Retry on the next tick after a connection failure. */ }
       finally { checkingExpirations = false; }
@@ -794,7 +894,7 @@
 
       async hashFile() {
         if (!hashWorkerURL) {
-          hashWorkerURL = URL.createObjectURL(new Blob([{{.UploadHashWorker}}], { type: 'text/javascript' }));
+          hashWorkerURL = URL.createObjectURL(new Blob([{{ upload_hash_worker_js|safe }}], { type: 'text/javascript' }));
         }
         const worker = new Worker(hashWorkerURL);
         this.hashWorker = worker;
@@ -1008,7 +1108,7 @@
     const pasteInput = document.getElementById('paste-input');
     const pasteBtn = document.getElementById('paste-btn');
     if (pasteBtn) {
-      pasteBtn.addEventListener('click', function() { uploadText(pasteInput.value); pasteInput.value = ''; });
+      pasteBtn.addEventListener('click', function() { uploadText(pasteInput.value); pasteInput.value = ''; pasteInput.removeAttribute('aria-invalid'); });
     }
     function pasteName(f) {
       // Browsers name clipboard images generically (e.g. "image.png"); make them unique.
@@ -1022,8 +1122,8 @@
       const ae = document.activeElement;
       const text = e.clipboardData.getData('text/plain');
       const files = Array.from(e.clipboardData.files || []);
-      // Let the filter and folder name fields receive text pastes normally.
-      if (ae && (ae.id === 'search' || ae.id === 'folder-name') && (text || files.length === 0)) return;
+      // Let the filter receive ordinary text pastes.
+      if (ae && ae.id === 'search' && (text || files.length === 0)) return;
       if (files.length > 0) {
         e.preventDefault();
         enqueueFiles(files.map(pasteName));
@@ -1064,4 +1164,3 @@
   </script>
 </body>
 </html>
-{{define "icoFile"}}<svg width="14" height="16" viewBox="0 0 14 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 1.5h6L12.5 6v8.5a0 0 0 0 1 0 0h-11V1.5z" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M7.5 1.7V6h4.3" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{{end}}{{define "icoDir"}}<svg width="15" height="16" viewBox="0 0 15 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1 3.5h4.6l1.3 1.6H14v8.4H1z" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{{end}}
