@@ -4,6 +4,17 @@ on:
   push:
     branches:
       - master
+    paths:
+      - 'src/**'
+      - 'templates/**'
+      - 'assets/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'build.rs'
+      - 'rust-toolchain.toml'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/docker.yml'
   workflow_dispatch:
 
 jobs:
