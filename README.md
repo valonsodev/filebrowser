@@ -41,3 +41,15 @@ Start it and open http://localhost:7667:
 ```sh
 docker compose up -d
 ```
+
+# Browser upload resuming
+
+Browser uploads start immediately without hashing the file. A random 128-bit
+upload ID is saved in localStorage using the destination, file name, size,
+modification time, and temporary-upload setting. Reselect the same file after a
+reload to resume an interrupted upload. Resume state expires on the server after
+24 hours; completing or canceling an upload clears its local ID. If browser
+storage is unavailable, retries still work within the current page.
+
+File metadata is used to recognize a reselected file; it does not verify file
+contents. API clients can still opt into content verification with Upload-SHA256.

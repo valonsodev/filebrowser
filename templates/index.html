@@ -731,7 +731,22 @@
     const PARTIAL_TYPE = 'application/partial-upload';
     const MAX_CONCURRENT = 3;
     const DISMISS_MS = 5000;
-    let hashWorkerURL = null;
+    // Store only a tiny resume identifier, never the file contents.
+    const resumeIds = new Map();
+    function resumeIdentity(file, temporary) {
+      const key = 'filebrowser:upload:v1:' + JSON.stringify([
+        window.location.pathname, file.name, file.size, file.lastModified, temporary
+      ]);
+      let id = resumeIds.get(key);
+      try { id = id || localStorage.getItem(key); } catch (_) {}
+      if (!/^[0-9a-f]{32}$/.test(id || '')) {
+        id = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+          b => b.toString(16).padStart(2, '0')).join('');
+      }
+      resumeIds.set(key, id);
+      try { localStorage.setItem(key, id); } catch (_) {}
+      return { key, id };
+    }
 
     function uploadOffset(xhr, min, max) {
       const raw = xhr.getResponseHeader('Upload-Offset');
@@ -798,10 +813,7 @@
         this.offset = 0;
         this.loaded = 0;
         this.location = null;
-        this.sha256 = null;
-        this.hashLoaded = 0;
-        this.hashWorker = null;
-        this.hashReject = null;
+        this.identity = resumeIdentity(file, this.temporary);
         this.completed = false;
         this.canceled = false;
         this.status = 'queued';
@@ -846,9 +858,6 @@
             '<span>' + fmtBytes(this.loaded) + ' / ' + fmtBytes(this.size) + '</span>' +
             '<span>' + fmtBytes(this.speed) + '/s</span>' +
             (remain > 0 ? '<span>' + Math.ceil(remain) + 's left</span>' : '');
-        } else if (this.status === 'hashing') {
-          this.pctEl.textContent = 'preparing';
-          this.metaEl.textContent = 'Preparing file: ' + (this.size ? Math.floor(this.hashLoaded / this.size * 100) : 100) + '%';
         } else if (this.status === 'done') {
           this.pctEl.textContent = 'done';
           this.metaEl.innerHTML = '<span>' + fmtBytes(this.size) + '</span><span>uploaded</span>';
@@ -899,42 +908,15 @@
         });
       }
 
-      async hashFile() {
-        if (!hashWorkerURL) {
-          hashWorkerURL = URL.createObjectURL(new Blob([{{ upload_hash_worker_js|safe }}], { type: 'text/javascript' }));
-        }
-        const worker = new Worker(hashWorkerURL);
-        this.hashWorker = worker;
-        try {
-          return await new Promise((resolve, reject) => {
-            this.hashReject = reject;
-            worker.onmessage = (event) => {
-              if (event.data.error) reject(new Error(event.data.error));
-              else if (event.data.hash) resolve(event.data.hash);
-              else {
-                this.hashLoaded = event.data.loaded;
-                this.render();
-              }
-            };
-            worker.onerror = () => reject(new Error('Unable to prepare file'));
-            worker.postMessage(this.file);
-          });
-        } finally {
-          worker.terminate();
-          this.hashWorker = null;
-          this.hashReject = null;
-        }
-      }
-
       async create() {
         const url = new URL(encodeURIComponent(this.name), window.location.href);
         if (this.temporary) url.searchParams.set('temporary', 'true');
         const xhr = await this.request('POST', url,
-          { 'Upload-Complete': '?0', 'Upload-Length': String(this.size), 'Upload-SHA256': this.sha256 }, new Blob([]));
+          { 'Upload-Complete': '?0', 'Upload-Length': String(this.size), 'Upload-ID': this.identity.id }, new Blob([]));
         if (xhr.status !== 201 && xhr.status !== 200) throw new Error('create failed (' + xhr.status + ')');
         const loc = xhr.getResponseHeader('Location');
         if (!/^\/\.uploads\/[0-9a-f]{32}$/.test(loc || '')) throw new Error('invalid upload location');
-        if (xhr.getResponseHeader('Upload-SHA256') !== this.sha256) throw new Error('server did not confirm file hash');
+        if (xhr.getResponseHeader('Upload-ID') !== this.identity.id) throw new Error('server did not confirm upload ID');
         this.offset = this.loaded = uploadOffset(xhr, 0, this.size);
         return loc;
       }
@@ -984,15 +966,10 @@
       async run() {
         try {
           this.lastT = null; this.lastBytes = this.loaded; this.speed = 0;
-          if (!this.sha256) {
-            this.status = 'hashing'; this.render();
-            this.sha256 = await this.hashFile();
-          }
           if (this.canceled) return;
-          // Deduplicate only after hashing: name, size and timestamps do not
-          // prove that two selections contain the same bytes.
+          // Metadata identifies a reselected file without reading its contents.
           const duplicate = Array.from(uploaders).some(u => u !== this && !u.completed && !u.canceled &&
-            u.status !== 'error' && u.sha256 === this.sha256 && u.name === this.name && u.temporary === this.temporary);
+            u.status !== 'error' && u.identity.id === this.identity.id && u.name === this.name && u.temporary === this.temporary);
           if (duplicate) { this.remove(); return; }
           this.status = this.location ? 'uploading' : 'starting'; this.render();
           if (this.location) await this.syncOffset();
@@ -1018,7 +995,15 @@
         }
       }
 
+      clearIdentity() {
+        if (resumeIds.get(this.identity.key) === this.identity.id) resumeIds.delete(this.identity.key);
+        try {
+          if (localStorage.getItem(this.identity.key) === this.identity.id) localStorage.removeItem(this.identity.key);
+        } catch (_) {}
+      }
+
       finish() {
+        this.clearIdentity();
         this.completed = true; this.status = 'done'; this.speed = 0; this.loaded = this.size;
         this.setClass(); this.render();
         const c = this.el.querySelector('.u-cancel');
@@ -1053,8 +1038,7 @@
       cancel() {
         if (this.completed || this.status === 'canceled' || this.status === 'error') { this.remove(); return; }
         this.canceled = true; this.speed = 0;
-        if (this.hashWorker) this.hashWorker.terminate();
-        if (this.hashReject) this.hashReject(new Error('aborted'));
+        this.clearIdentity();
         if (this.xhr) this.xhr.abort();
         const i = queue.indexOf(this); if (i >= 0) queue.splice(i, 1);
         if (this.location) fetch(this.location, { method: 'DELETE' }).catch(() => {});

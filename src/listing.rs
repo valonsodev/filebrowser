@@ -80,7 +80,6 @@ struct Page<'a> {
     breadcrumbs: Vec<Crumb>,
     files: Vec<FileInfo>,
     current_path_js: String,
-    upload_hash_worker_js: String,
 }
 pub fn format_size(bytes: u64) -> String {
     if bytes < 1024 {
@@ -311,15 +310,6 @@ fn render_directory(
                 url: current.clone(),
             });
         }
-        let worker = if app.config.upload {
-            concat!(
-                include_str!("../assets/js-sha256.min.js"),
-                "\n",
-                include_str!("../assets/upload-hash-worker.js")
-            )
-        } else {
-            ""
-        };
         Page {
             title: &app.config.title,
             current_path: path,
@@ -332,7 +322,6 @@ fn render_directory(
             breadcrumbs,
             files,
             current_path_js: js_string(path),
-            upload_hash_worker_js: js_string(worker),
         }
         .render()
         .map_err(|e| ApiError::internal(e.to_string()))?

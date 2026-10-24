@@ -35,6 +35,8 @@ pub struct Upload {
     pub target: String,
     #[serde(default)]
     pub sha256: String,
+    #[serde(default)]
+    pub client_id: String,
     pub offset: u64,
     pub length: u64,
     pub length_known: bool,
@@ -54,6 +56,7 @@ pub struct Upload {
 pub struct UploadEntry {
     target: String,
     sha256: String,
+    client_id: String,
     temporary: bool,
     pub state: tokio::sync::Mutex<Upload>,
 }
@@ -62,6 +65,7 @@ impl UploadEntry {
         Self {
             target: upload.target.clone(),
             sha256: upload.sha256.clone(),
+            client_id: upload.client_id.clone(),
             temporary: upload.temporary,
             state: tokio::sync::Mutex::new(upload),
         }
@@ -104,6 +108,9 @@ impl Upload {
         );
         if self.length_known {
             headers.insert("upload-length", self.length.into());
+        }
+        if !self.client_id.is_empty() {
+            headers.insert("upload-id", self.client_id.parse().unwrap());
         }
         if !self.sha256.is_empty() {
             headers.insert("upload-sha256", self.sha256.parse().unwrap());
@@ -175,6 +182,7 @@ impl App {
                     || (u.length_known && u.offset > u.length)
                     || (u.complete && (!u.length_known || u.offset != u.length))
                     || (!u.sha256.is_empty() && (!valid_hex(&u.sha256, 64) || !u.length_known))
+                    || (!u.client_id.is_empty() && !valid_hex(&u.client_id, 32))
                     || user_path(&u.target).ok().as_deref() != Some(u.target.as_str())
                     || u.target == "."
                 {
@@ -384,12 +392,25 @@ pub async fn create(
         ));
     }
     let hash = header(&headers, "upload-sha256").to_owned();
-    let _discovery = if !hash.is_empty() {
-        if !valid_hex(&hash, 64)
+    let client_id = header(&headers, "upload-id").to_owned();
+    if !client_id.is_empty()
+        && (!valid_hex(&client_id, 32)
             || length.is_none()
             || complete
             || content_length != Some(0)
-            || headers.get_all("upload-sha256").iter().count() != 1
+            || headers.get_all("upload-id").iter().count() != 1)
+    {
+        return Err(ApiError::bad(
+            "Upload-ID requires 32 lowercase hex digits, Upload-Length, Upload-Complete: ?0 and an empty body",
+        ));
+    }
+    let _discovery = if !hash.is_empty() || !client_id.is_empty() {
+        if !hash.is_empty()
+            && (!valid_hex(&hash, 64)
+                || length.is_none()
+                || complete
+                || content_length != Some(0)
+                || headers.get_all("upload-sha256").iter().count() != 1)
         {
             return Err(ApiError::bad(
                 "Upload-SHA256 requires a lowercase SHA-256 digest, Upload-Length, Upload-Complete: ?0 and an empty body",
@@ -399,10 +420,14 @@ pub async fn create(
     } else {
         None
     };
-    if !hash.is_empty() {
+    if !hash.is_empty() || !client_id.is_empty() {
         let entries: Vec<_> = app.uploads.lock().unwrap().values().cloned().collect();
         for entry in entries {
-            if entry.target != target || entry.sha256 != hash || entry.temporary != temporary {
+            if entry.target != target
+                || entry.sha256 != hash
+                || entry.client_id != client_id
+                || entry.temporary != temporary
+            {
                 continue;
             }
             let mut u = entry.state.lock().await;
@@ -410,6 +435,7 @@ pub async fn create(
                 && !u.complete
                 && u.target == target
                 && u.sha256 == hash
+                && u.client_id == client_id
                 && Some(u.length) == length
                 && u.length_known
                 && u.temporary == temporary
@@ -435,6 +461,7 @@ pub async fn create(
         id: id.clone(),
         target,
         sha256: hash,
+        client_id,
         offset: 0,
         length: length.unwrap_or(0),
         length_known: length.is_some(),
