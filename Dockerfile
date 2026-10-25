@@ -4,7 +4,6 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY templates ./templates
-COPY assets ./assets
 ARG GIT_COMMIT=unknown
 RUN cargo build --release --locked
 RUN mkdir -p /seed-files /seed-uploads

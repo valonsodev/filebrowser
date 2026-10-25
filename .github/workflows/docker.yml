@@ -7,7 +7,6 @@ on:
     paths:
       - 'src/**'
       - 'templates/**'
-      - 'assets/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'build.rs'
