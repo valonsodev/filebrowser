@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Password required</title>
+<style>body{font:16px system-ui;max-width:28rem;margin:15vh auto;padding:1rem;color-scheme:light dark}input,button{font:inherit;padding:.6rem;margin:.5rem 0}label,input{display:block}#status{min-height:2rem}</style>
+<h1>Password required</h1>
+<form id="unlock"><label for="password">File password</label><input id="password" type="password" autocomplete="off" required maxlength="1024" autofocus><button>Download</button></form><p id="status" role="status"></p>
+<script>
+document.getElementById('unlock').addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = document.getElementById('password');
+  const status = document.getElementById('status');
+  const button = event.target.querySelector('button');
+  const password = input.value; input.value = ''; button.disabled = true;
+  try {
+    if (!/^[\x20-\x7e]{1,1024}$/.test(password)) throw new Error('Use 1–1024 printable ASCII characters.');
+    status.textContent = 'Downloading…';
+    const response = await fetch(window.location.pathname, {headers: {'File-Password': password}, cache: 'no-store', redirect: 'error'});
+    if (!response.ok) throw new Error(response.status === 401 ? 'Incorrect password.' : 'Download failed (' + response.status + '). Try again shortly.');
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a'); link.href = url;
+    const match = /filename\*=UTF-8''([^;]+)/i.exec(response.headers.get('Content-Disposition') || '');
+    link.download = match ? decodeURIComponent(match[1]) : 'download';
+    document.body.appendChild(link); link.click(); link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    status.textContent = 'Download ready.';
+  } catch (error) { status.textContent = error.message; input.focus(); }
+  finally { button.disabled = false; }
+});
+</script></html>

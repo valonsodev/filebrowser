@@ -61,6 +61,7 @@ pub struct FileInfo {
     pub size_bytes: u64,
     pub mod_unix: i64,
     pub expires_unix: i64,
+    pub protected: bool,
 }
 pub struct Crumb {
     pub label: String,
@@ -205,6 +206,7 @@ fn render_directory(
     let mut files = Vec::new();
     let entries = app.files.names(rel)?;
     let expirations = app.actions.lock().unwrap().clone();
+
     for name in entries {
         if name == PRIVATE {
             continue;
@@ -214,10 +216,13 @@ fn render_directory(
         } else {
             format!("{rel}/{name}")
         };
+        let protections = app.protections.lock().unwrap();
+        let protection = protections.get(&target).cloned();
         let Ok(file) = app.files.open_file(&target, OFlags::RDONLY, 0) else {
             continue;
         };
         let Ok(info) = file.metadata() else { continue };
+        drop(protections);
         let modified = info.modified().unwrap_or(std::time::UNIX_EPOCH);
         let date: DateTime<chrono::Local> = modified.into();
         let (bytes, complete) = if info.is_dir() {
@@ -226,18 +231,40 @@ fn render_directory(
         } else {
             (info.len(), true)
         };
+        let protected_url = protection
+            .as_ref()
+            .map(|hash| crate::password::location(&target, hash));
+        let public_name = protected_url
+            .as_ref()
+            .map(|url| format!("Protected file {}", &url[url.len() - 8..]))
+            .unwrap_or_else(|| name.clone());
         files.push(FileInfo {
-            url: format!(
-                "./{}{}",
-                encode_segment(&name),
-                if info.is_dir() { "/" } else { "" }
-            ),
-            name,
-            size: format!("{}{}", if complete { "" } else { "~" }, format_size(bytes)),
-            last_modified: date.format("%Y-%m-%d %H:%M%:z").to_string(),
+            protected: protection.is_some(),
+            url: protected_url.unwrap_or_else(|| {
+                format!(
+                    "./{}{}",
+                    encode_segment(&name),
+                    if info.is_dir() { "/" } else { "" }
+                )
+            }),
+            name: public_name,
+            size: if protection.is_some() {
+                "—".into()
+            } else {
+                format!("{}{}", if complete { "" } else { "~" }, format_size(bytes))
+            },
+            last_modified: if protection.is_some() {
+                "—".into()
+            } else {
+                date.format("%Y-%m-%d %H:%M%:z").to_string()
+            },
             is_dir: info.is_dir(),
-            size_bytes: bytes,
-            mod_unix: date.timestamp(),
+            size_bytes: if protection.is_some() { 0 } else { bytes },
+            mod_unix: if protection.is_some() {
+                0
+            } else {
+                date.timestamp()
+            },
             expires_unix: expirations
                 .get(&target)
                 .map_or(0, |e| e.expires_at.timestamp()),
@@ -281,10 +308,27 @@ fn render_directory(
                     "| [{}{}](<{}>) | {} | {} | {} | {} |\n",
                     markdown_text(&file.name),
                     suffix,
-                    absolute_url(headers, &format!("{path}{}{suffix}", file.name)),
-                    if file.is_dir { "directory" } else { "file" },
+                    absolute_url(
+                        headers,
+                        &if file.protected {
+                            file.url.clone()
+                        } else {
+                            format!("{path}{}{suffix}", file.name)
+                        }
+                    ),
+                    if file.is_dir {
+                        "directory"
+                    } else if file.protected {
+                        "file (password required)"
+                    } else {
+                        "file"
+                    },
                     file.size,
-                    timestamp(file.mod_unix),
+                    if file.protected {
+                        "—".into()
+                    } else {
+                        timestamp(file.mod_unix)
+                    },
                     if file.expires_unix > 0 {
                         timestamp(file.expires_unix)
                     } else {
@@ -293,8 +337,19 @@ fn render_directory(
                 );
             }
         }
+        if let Some(file) = files.iter().find(|file| file.protected) {
+            let download_url = absolute_url(headers, &file.url).replace('\'', "'\"'\"'");
+            out += &format!(
+                "\n## Download a protected file\n\nProtected entries hide their original filenames. Replace `YOUR_PASSWORD` with the file's password and use its link from the table:\n\n```sh\ncurl -fLOJ -H 'File-Password: YOUR_PASSWORD' -- '{download_url}'\n```\n\nSend the password in the `File-Password` header, never in the URL. Opening the link in a browser shows a password form.\n"
+            );
+        }
         if app.config.upload {
             out += &format!("\n## Upload a file\n\n```sh\n{curl_example}\n```\n");
+            let upload_url =
+                absolute_url(headers, &format!("{path}file.txt")).replace('\'', "'\"'\"'");
+            out += &format!(
+                "\nTo password protect an upload, replace `YOUR_PASSWORD` with your chosen password:\n\n```sh\ncurl -H 'File-Password: YOUR_PASSWORD' -T file.txt -- '{upload_url}'\n```\n\nTo also delete it 5 minutes after completion:\n\n```sh\ncurl -H 'File-Password: YOUR_PASSWORD' -T file.txt -- '{upload_url}?temporary=true'\n```\n\nUse the same header to overwrite or delete protected files, change their expiry, or resume their uploads. In the browser, enable the lock toggle before uploading; it can be combined with the 5-minute toggle.\n"
+            );
         }
         out
     } else {

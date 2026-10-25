@@ -18,7 +18,7 @@ pub fn user_path(path: &str) -> io::Result<String> {
     if rel.contains(['\\', '\0'])
         || rel
             .split('/')
-            .any(|p| matches!(p, "" | "." | ".." | PRIVATE))
+            .any(|p| matches!(p, "" | "." | ".." | PRIVATE | ".protected"))
     {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,

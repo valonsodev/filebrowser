@@ -5,7 +5,10 @@ mod download;
 mod filesystem;
 mod listing;
 mod metrics;
+mod password;
 mod state;
+#[cfg(test)]
+mod tests;
 mod upload;
 mod web;
 

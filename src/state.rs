@@ -60,6 +60,8 @@ pub struct App {
     pub files: Root,
     pub store: Option<Root>,
     pub actions: Mutex<Expirations>,
+    pub protections: Mutex<HashMap<String, String>>,
+    pub password_work: crate::password::Work,
     pub uploads: Mutex<HashMap<String, UploadRef>>,
     pub discovery: tokio::sync::Mutex<()>,
     pub sizes: Mutex<HashMap<String, DirSize>>,
@@ -74,6 +76,16 @@ impl App {
                 Ok(data) => {
                     serde_json::from_slice::<Option<Expirations>>(&data)?.unwrap_or_default()
                 }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => HashMap::new(),
+                Err(e) => return Err(e),
+            },
+            Err(e) if e.kind() == io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(e),
+        };
+        // A malformed verifier file prevents startup rather than exposing protected data.
+        let protections = match files.subdir(PRIVATE, false) {
+            Ok(meta) => match meta.read("passwords.json", 64 * 1024 * 1024) {
+                Ok(data) => serde_json::from_slice::<HashMap<String, String>>(&data)?,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => HashMap::new(),
                 Err(e) => return Err(e),
             },
@@ -103,6 +115,8 @@ impl App {
             files,
             store,
             actions: Mutex::new(expirations),
+            protections: Mutex::new(protections),
+            password_work: Default::default(),
             uploads: Mutex::new(HashMap::new()),
             discovery: tokio::sync::Mutex::new(()),
             sizes: Mutex::new(HashMap::new()),
@@ -122,6 +136,11 @@ impl App {
             .subdir(PRIVATE, true)?
             .atomic_write("expirations.json", &serde_json::to_vec(entries)?)
     }
+    pub fn save_protections(&self, entries: &HashMap<String, String>) -> io::Result<()> {
+        self.files
+            .subdir(PRIVATE, true)?
+            .atomic_write("passwords.json", &serde_json::to_vec(entries)?)
+    }
     pub fn invalidate_sizes(&self, target: &str) {
         let mut sizes = self.sizes.lock().unwrap();
         sizes.remove(".");
@@ -133,6 +152,8 @@ impl App {
     }
     pub fn expire_files(&self) -> io::Result<()> {
         let mut entries = self.actions.lock().unwrap();
+        let mut protections = self.protections.lock().unwrap();
+        let mut protections_changed = false;
         let mut changed = false;
         let mut remove = Vec::new();
         for (path, expiry) in entries.iter() {
@@ -154,6 +175,7 @@ impl App {
                             eprintln!("Expiring {path}: {e}");
                             continue;
                         }
+                        protections_changed |= protections.remove(path).is_some();
                         self.invalidate_sizes(path);
                     }
                     remove.push(path.clone());
@@ -174,17 +196,34 @@ impl App {
             entries.remove(&path);
             changed = true;
         }
+        if protections_changed {
+            self.save_protections(&protections)?;
+        }
         if changed {
             self.save_expirations(&entries)?;
         }
         Ok(())
     }
     /// Caller does not hold actions. The lock covers installation and expiry state only.
-    pub fn install(&self, source: &str, target: &str, temporary: bool) -> io::Result<i64> {
+    pub fn install(
+        &self,
+        source: &str,
+        target: &str,
+        temporary: bool,
+        password_hash: Option<&str>,
+        expected: Option<&str>,
+    ) -> io::Result<i64> {
         if user_path(target).ok().as_deref() != Some(target) || target == "." {
             return Err(io::Error::other("invalid upload target"));
         }
         let mut entries = self.actions.lock().unwrap();
+        let mut protections = self.protections.lock().unwrap();
+        if protections.get(target).map(String::as_str) != expected {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "File protection changed; restart the upload",
+            ));
+        }
         self.files.validate_existing(target)?;
         let meta = self.files.subdir(PRIVATE, true)?;
         let stage = format!("upload-{}", new_id()?);
@@ -192,7 +231,11 @@ impl App {
             let mut output = meta.open_file(
                 &stage,
                 OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
-                0o644,
+                if password_hash.is_some() {
+                    0o600
+                } else {
+                    0o644
+                },
             )?;
             let mut input = self.store().open_file(source, OFlags::RDONLY, 0)?;
             io::copy(&mut input, &mut output)?;
@@ -216,6 +259,12 @@ impl App {
                 );
             } else {
                 entries.remove(target);
+            }
+            // Persist protection before publishing bytes. On I/O failure retain it:
+            // rename may already have succeeded before a directory sync fails.
+            if let Some(hash) = password_hash {
+                protections.insert(target.into(), hash.into());
+                self.save_protections(&protections)?;
             }
             let persist = temporary || old.is_some();
             if let Err(error) = (|| {
@@ -243,6 +292,7 @@ impl App {
         result
     }
     pub fn dir_size(&self, path: &str, modified: std::time::SystemTime) -> DirSize {
+        let protections = self.protections.lock().unwrap();
         if let Some(cached) = self
             .sizes
             .lock()
@@ -275,6 +325,9 @@ impl App {
                     } else {
                         format!("{path}/{name}")
                     };
+                    if protections.contains_key(&child) {
+                        continue;
+                    }
                     if let Ok(file) = self.files.open_file(&child, OFlags::RDONLY, 0)
                         && let Ok(info) = file.metadata()
                     {

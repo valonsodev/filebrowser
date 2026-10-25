@@ -129,6 +129,10 @@
   .temporary-toggle { position: relative; display: flex; align-items: center; justify-content: center; flex: 0 0 30px; color: var(--muted); cursor: pointer; border: 0; outline: none; background: none; }
   .temporary-toggle input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; outline: none; }
   .temporary-toggle svg { pointer-events: none; }
+  .temporary-toggle:has(input:focus-visible) { outline: 2px solid var(--fg-strong); outline-offset: 3px; border-radius: 4px; }
+  #password-dialog { color: var(--fg); background: var(--bg); border: 1px solid var(--muted); border-radius: 8px; padding: 24px; max-width: min(420px, 90vw); }
+  #password-dialog::backdrop { background: rgba(0,0,0,.55); }
+  #file-password { font: inherit; color: inherit; background: transparent; border: 1px solid var(--muted); border-radius: 4px; padding: 8px; width: 100%; box-sizing: border-box; }
   .temporary-toggle:has(input:checked) { color: var(--fg-strong); }
   .table-heading { padding: 14px 16px 0; }
   @media (prefers-reduced-motion: reduce) { .search-control { transition: none; } }
@@ -347,6 +351,10 @@
           <input id="temporary-uploads" type="checkbox" role="switch" aria-label="Temporary uploads (5 minutes)">
           <svg aria-hidden="true" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-timer preview-icon"><line x1="10" x2="14" y1="2" y2="2"/><line x1="12" x2="15" y1="14" y2="11"/><circle cx="12" cy="14" r="8"/></svg>
         </label>
+        <label class="temporary-toggle" title="Password protect uploads while enabled">
+          <input id="password-uploads" type="checkbox" role="switch" aria-label="Password protect uploads">
+          <svg aria-hidden="true" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V6a4 4 0 0 1 8 0v4"/></svg>
+        </label>
         {% endif %}
       </div>
       {% if !disable_upload %}
@@ -386,8 +394,8 @@
       </tr>
       {% endif %}
       {% for file in files %}
-      <tr class="filerow"{% if file.is_dir %} data-dir="1"{% endif %} data-name="{{ file.name }}" data-size="{{ file.size_bytes }}" data-mtime="{{ file.mod_unix }}" data-expires="{{ file.expires_unix }}">
-        <td class="c-name"><div class="name-content"><span class="ico">{% if file.is_dir %}<svg width="15" height="16" viewBox="0 0 15 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1 3.5h4.6l1.3 1.6H14v8.4H1z" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{% else %}<svg width="14" height="16" viewBox="0 0 14 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 1.5h6L12.5 6v8.5a0 0 0 0 1 0 0h-11V1.5z" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M7.5 1.7V6h4.3" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{% endif %}</span><a href="{{ file.url }}"{% if !file.is_dir %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ file.name }}{% if file.is_dir %}/{% endif %}</a></div></td>
+      <tr class="filerow"{% if file.is_dir %} data-dir="1"{% endif %} data-protected="{{ file.protected }}" data-name="{{ file.name }}" data-size="{{ file.size_bytes }}" data-mtime="{{ file.mod_unix }}" data-expires="{{ file.expires_unix }}">
+        <td class="c-name"><div class="name-content"><span class="ico">{% if file.is_dir %}<svg width="15" height="16" viewBox="0 0 15 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1 3.5h4.6l1.3 1.6H14v8.4H1z" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{% else %}<svg width="14" height="16" viewBox="0 0 14 16" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path d="M1.5 1.5h6L12.5 6v8.5a0 0 0 0 1 0 0h-11V1.5z" stroke="currentColor" stroke-width="1.1" fill="none"/><path d="M7.5 1.7V6h4.3" stroke="currentColor" stroke-width="1.1" fill="none"/></svg>{% endif %}</span><a href="{{ file.url }}"{% if !file.is_dir %} target="_blank" rel="noopener noreferrer"{% endif %}>{% if file.protected %}🔒 {% endif %}{{ file.name }}{% if file.is_dir %}/{% endif %}</a></div></td>
         <td class="c-size">{{ file.size }}</td>
         <td class="c-date">{{ file.last_modified }}</td>
         <td class="c-actions">
@@ -422,10 +430,53 @@
             <span class="expiry"></span>
           </div></template>
 
+  <dialog id="password-dialog">
+    <form method="dialog" id="password-form">
+      <p id="password-purpose">File password</p>
+      <input id="file-password" type="password" autocomplete="off" maxlength="1024" required aria-labelledby="password-purpose">
+      <p><button class="btn" type="button" id="password-cancel">Cancel</button> <button class="btn" type="submit">Continue</button></p>
+    </form>
+  </dialog>
   <script>
     const currentPath = {{ current_path_js|safe }};
     const fileIco = document.getElementById('ico-file').innerHTML;
     const temporaryUploads = document.getElementById('temporary-uploads');
+    const passwordUploads = document.getElementById('password-uploads');
+    let uploadPassword = null;
+    let passwordPending = false;
+    function askPassword(purpose) {
+      if (passwordPending) return Promise.resolve(null);
+      passwordPending = true;
+      return new Promise(resolve => {
+        const dialog = document.getElementById('password-dialog');
+        const form = document.getElementById('password-form');
+        const input = document.getElementById('file-password');
+        document.getElementById('password-purpose').textContent = purpose;
+        input.value = ''; dialog.returnValue = '';
+        form.onsubmit = event => {
+          event.preventDefault();
+          if (!/^[\x20-\x7e]{1,1024}$/.test(input.value)) {
+            input.setCustomValidity('Use 1–1024 printable ASCII characters.'); input.reportValidity(); return;
+          }
+          dialog.close('continue');
+        };
+        input.oninput = () => input.setCustomValidity('');
+        document.getElementById('password-cancel').onclick = () => dialog.close();
+        dialog.addEventListener('close', () => {
+          const value = dialog.returnValue === 'continue' ? input.value : null;
+          input.value = ''; input.setCustomValidity(''); passwordPending = false; resolve(value);
+        }, {once: true});
+        dialog.showModal(); input.focus();
+      });
+    }
+    if (passwordUploads) passwordUploads.addEventListener('change', async () => {
+      uploadPassword = null;
+      if (!passwordUploads.checked) return;
+      passwordUploads.checked = false;
+      const password = await askPassword('Password for new uploads (filenames will be hidden)');
+      passwordUploads.checked = password !== null;
+      uploadPassword = password;
+    });
 
     function fmtBytes(b) {
       if (b < 1024) return b + ' B';
@@ -527,13 +578,14 @@
       tr.appendChild(actions);
       return tr;
     }
-    function addOrUpdateFile(name, size, expiresAt) {
-      const lname = name.toLowerCase();
+    function addOrUpdateFile(name, size, expiresAt, protectedUrl) {
+      const originalName = name;
+      if (protectedUrl) { name = 'Protected file ' + protectedUrl.slice(-8); size = 0; }
       const dateStr = nowStamp(), mtime = Math.floor(Date.now() / 1000);
       let tr = null;
       for (const r of tbody.children) {
         if (r.classList.contains('parent')) continue;
-        if ((r.dataset.name || '').toLowerCase() === lname) { tr = r; break; }
+        if (r.dataset.name === name || r.dataset.name === originalName) { tr = r; break; }
       }
       if (tr) {
         tr.dataset.size = String(size); tr.dataset.mtime = String(mtime);
@@ -547,6 +599,15 @@
         const parent = tbody.querySelector('tr.parent');
         if (parent) parent.after(tr); else tbody.prepend(tr);
         setTimeout(function() { tr.classList.remove('flash', 'new-row'); }, 1500);
+      }
+      tr.dataset.name = name;
+      tr.dataset.protected = String(Boolean(protectedUrl));
+      if (protectedUrl) {
+        tr.querySelector('.c-name a').href = protectedUrl;
+        tr.querySelector('.c-name a').textContent = '🔒 ' + name;
+        tr.querySelector('.c-size').textContent = '—';
+        tr.querySelector('.c-date').textContent = '—';
+        tr.dataset.mtime = '0';
       }
       tr.dataset.expires = String(expiresAt || 0);
       updateExpiry(tr);
@@ -567,7 +628,7 @@
         event.preventDefault();
         if (folderButton.disabled) return;
         const name = folderName.value.trim();
-        const reserved = name === '.filebrowser' || name === '.uploads';
+        const reserved = name === '.filebrowser' || name === '.uploads' || name === '.protected';
         if (!name || name === '.' || name === '..' || /[\/\\\r\n]/.test(name) || reserved) {
           folderName.setAttribute('aria-invalid', 'true');
           notifyAction(reserved ? 'That folder name is reserved. Choose another name.' : 'Enter a single folder name without slashes or line breaks; . and .. are not valid names.', true);
@@ -668,11 +729,31 @@
       if (!copied) throw new Error('Clipboard access is unavailable.');
     }
     tbody.addEventListener('click', async function(event) {
+      const fileLink = event.target.closest('.c-name a');
+      if (fileLink && fileLink.closest('tr').dataset.protected === 'true') {
+        event.preventDefault();
+        const password = await askPassword('Password to download this protected file');
+        if (password === null) return;
+        try {
+          notifyAction('Downloading…');
+          const response = await fetch(fileLink.href, {headers: {'File-Password': password}, cache: 'no-store', redirect: 'error'});
+          if (!response.ok) throw new Error(await responseMessage(response));
+          const disposition = response.headers.get('Content-Disposition') || '';
+          const match = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
+          const url = URL.createObjectURL(await response.blob());
+          const link = document.createElement('a'); link.href = url;
+          link.download = match ? decodeURIComponent(match[1]) : 'download';
+          document.body.appendChild(link); link.click(); link.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 60000);
+          notifyAction('Download ready.');
+        } catch (error) { notifyAction(error.message || 'Download failed.', true); }
+        return;
+      }
       const copy = event.target.closest('.copy-curl');
       if (copy) {
         const tr = copy.closest('tr');
         const url = tr.querySelector('.c-name a').href;
-        const command = "curl -fLOJ -- '" + url.replace(/'/g, "'\"'\"'") + "'";
+        const command = "curl -fLOJ " + (tr.dataset.protected === 'true' ? "-H 'File-Password: YOUR_PASSWORD' " : "") + "-- '" + url.replace(/'/g, "'\"'\"'") + "'";
         try {
           await copyText(command);
           copy.textContent = 'Copied';
@@ -687,12 +768,18 @@
       const tr = button.closest('tr');
       const name = tr.dataset.name;
       const target = tr.querySelector('.c-name a').href;
+      const headers = {};
+      if (tr.dataset.protected === 'true') {
+        const password = await askPassword('Password to delete this protected file');
+        if (password === null) return;
+        headers['File-Password'] = password;
+      }
       const marker = document.createComment('pending deletion');
       button.disabled = true;
       preserveScrollPosition();
       tr.replaceWith(marker);
       try {
-        const response = await fetch(target, { method: 'DELETE' });
+        const response = await fetch(target, { method: 'DELETE', headers });
         if (!response.ok) throw new Error(await responseMessage(response));
         marker.remove();
         notifyAction('Deleted "' + name + '".');
@@ -733,9 +820,9 @@
     const DISMISS_MS = 5000;
     // Store only a tiny resume identifier, never the file contents.
     const resumeIds = new Map();
-    function resumeIdentity(file, temporary) {
+    function resumeIdentity(file, temporary, protectedFile) {
       const key = 'filebrowser:upload:v1:' + JSON.stringify([
-        window.location.pathname, file.name, file.size, file.lastModified, temporary
+        window.location.pathname, file.name, file.size, file.lastModified, temporary, protectedFile
       ]);
       let id = resumeIds.get(key);
       try { id = id || localStorage.getItem(key); } catch (_) {}
@@ -771,6 +858,9 @@
     }
     function enqueue(u) { queue.push(u); pump(); }
     function enqueueFiles(list) {
+      if (passwordPending || (passwordUploads && passwordUploads.checked && !uploadPassword)) {
+        notifyAction('Finish setting the upload password first.', true); return;
+      }
       for (const f of list) { if (f) new Uploader(f); }
       pump();
     }
@@ -806,6 +896,8 @@
     class Uploader {
       constructor(file) {
         this.file = file;
+        this.password = uploadPassword;
+        this.protectedUrl = null;
         this.temporary = Boolean(temporaryUploads && temporaryUploads.checked);
         this.expiresAt = 0;
         this.name = file.name;
@@ -813,7 +905,7 @@
         this.offset = 0;
         this.loaded = 0;
         this.location = null;
-        this.identity = resumeIdentity(file, this.temporary);
+        this.identity = resumeIdentity(file, this.temporary, Boolean(this.password));
         this.completed = false;
         this.canceled = false;
         this.status = 'queued';
@@ -899,6 +991,7 @@
           const xhr = new XMLHttpRequest();
           this.xhr = xhr;
           xhr.open(method, url);
+          if (this.password) xhr.setRequestHeader('File-Password', this.password);
           for (const k in headers) xhr.setRequestHeader(k, headers[k]);
           if (onprogress && xhr.upload) xhr.upload.onprogress = onprogress;
           xhr.onload = () => { this.xhr = null; resolve(xhr); };
@@ -929,6 +1022,7 @@
           return;
         }
         if (xhr.status !== 204) throw new Error('resume failed (' + xhr.status + ')');
+        this.protectedUrl = xhr.getResponseHeader('File-Location') || this.protectedUrl;
         this.expiresAt = Number(xhr.getResponseHeader('File-Expires-At') || 0);
         const off = uploadOffset(xhr, 0, this.size);
         this.offset = off; this.loaded = off;
@@ -944,6 +1038,7 @@
           blob,
           (e) => this.onProgress(start + e.loaded))
           .then((xhr) => {
+            this.protectedUrl = xhr.getResponseHeader('File-Location') || this.protectedUrl;
             this.expiresAt = Number(xhr.getResponseHeader('File-Expires-At') || 0);
             if (xhr.status === 204 || xhr.status === 201) {
               const off = uploadOffset(xhr, start, end);
@@ -975,7 +1070,7 @@
           if (this.location) await this.syncOffset();
           if (!this.location) this.location = await this.create();
           if (this.canceled) {
-            if (this.location) fetch(this.location, { method: 'DELETE' }).catch(() => {});
+            if (this.location) fetch(this.location, { method: 'DELETE', headers: this.password ? {'File-Password': this.password} : {} }).catch(() => {});
             return;
           }
           if (this.completed) { this.finish(); return; }
@@ -1008,7 +1103,8 @@
         this.setClass(); this.render();
         const c = this.el.querySelector('.u-cancel');
         if (c) { c.title = 'Dismiss'; c.onclick = () => this.remove(); }
-        addOrUpdateFile(this.name, this.size, this.expiresAt);
+        addOrUpdateFile(this.name, this.size, this.expiresAt, this.protectedUrl);
+        this.password = null;
         setTimeout(() => this.remove(), DISMISS_MS);
       }
 
@@ -1041,13 +1137,14 @@
         this.clearIdentity();
         if (this.xhr) this.xhr.abort();
         const i = queue.indexOf(this); if (i >= 0) queue.splice(i, 1);
-        if (this.location) fetch(this.location, { method: 'DELETE' }).catch(() => {});
+        if (this.location) fetch(this.location, { method: 'DELETE', headers: this.password ? {'File-Password': this.password} : {} }).catch(() => {});
         this.status = 'canceled'; this.setClass(); this.render();
         const c = this.el.querySelector('.u-cancel');
         if (c) c.onclick = () => this.remove();
       }
 
       remove() {
+        this.password = null;
         uploaders.delete(this);
         if (this.el) {
           this.el.classList.add('removing');
@@ -1092,6 +1189,9 @@
 
     function uploadText(text) {
       if (!text) return;
+      if (passwordPending || (passwordUploads && passwordUploads.checked && !uploadPassword)) {
+        notifyAction('Finish setting the upload password first.', true); return;
+      }
       const name = 'paste-' + nowStamp().slice(0, 10) + '-' + String(Date.now()).slice(-6) + '.txt';
       new Uploader(new File([text], name, { type: 'text/plain' }));
       pump();
@@ -1114,7 +1214,7 @@
       const text = e.clipboardData.getData('text/plain');
       const files = Array.from(e.clipboardData.files || []);
       // Let the filter receive ordinary text pastes.
-      if (ae && ae.id === 'search' && (text || files.length === 0)) return;
+      if (ae && (ae.id === 'search' || ae.type === 'password') && (text || files.length === 0)) return;
       if (files.length > 0) {
         e.preventDefault();
         enqueueFiles(files.map(pasteName));

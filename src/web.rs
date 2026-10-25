@@ -224,10 +224,17 @@ pub async fn handler(State(app): State<Arc<App>>, request: Request) -> Response 
         && query_value(request.uri().query().unwrap_or(""), "folder").as_deref() != Some("true")
         || (method == Method::PATCH && request.uri().path().starts_with(upload::PREFIX));
     let result = dispatch(app.clone(), request).await;
-    let response = match result {
+    let mut response = match result {
         Ok(r) => r,
         Err(e) => e.into_response(),
     };
+    // Credentials and protected bytes must never enter browser/shared caches.
+    response
+        .headers_mut()
+        .insert("cache-control", "no-store".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("referrer-policy", "no-referrer".parse().unwrap());
     if !metrics {
         app.metrics.record_request(response.status().as_u16() < 400);
     }
@@ -285,10 +292,19 @@ async fn dispatch(app: Arc<App>, request: Request) -> Result<Response, ApiError>
         return Ok(result);
     }
     check_origin(&method, &headers)?;
-    let path = percent_decode_str(uri.path())
+    let mut path = percent_decode_str(uri.path())
         .decode_utf8()
         .map_err(|_| ApiError::bad("Invalid URL encoding"))?
         .into_owned();
+    if path.starts_with("/.protected/") {
+        let protections = app.protections.lock().unwrap();
+        let original = protections
+            .iter()
+            .find(|(name, hash)| crate::password::location(name, hash) == path)
+            .map(|(name, _)| format!("/{name}"))
+            .ok_or_else(ApiError::not_found)?;
+        path = original;
+    }
     if path.starts_with(upload::PREFIX) {
         if !app.config.upload {
             return Err(ApiError::new(
@@ -319,7 +335,7 @@ async fn dispatch(app: Arc<App>, request: Request) -> Result<Response, ApiError>
             if headers.contains_key("upload-complete") {
                 return upload::create(app, &path, headers, temp, body).await;
             }
-            return upload::put(app, &path, temp, body).await;
+            return upload::put(app, &path, temp, headers, body).await;
         }
         Method::POST => {
             if headers.contains_key("upload-complete") {
@@ -363,8 +379,16 @@ async fn dispatch(app: Arc<App>, request: Request) -> Result<Response, ApiError>
                 }
             };
             let rel = target(&app, &path)?;
+            let expected = crate::password::authorize(&app, &rel, &headers).await?;
             return tokio::task::spawn_blocking(move || {
                 let mut entries = app.actions.lock().unwrap();
+                let mut protections = app.protections.lock().unwrap();
+                if protections.get(&rel) != expected.as_ref() {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        "File protection changed; retry",
+                    ));
+                }
                 let file = app.files.open_file(&rel, OFlags::RDONLY, 0)?;
                 let info = file.metadata()?;
                 if !info.is_file() {
@@ -374,6 +398,9 @@ async fn dispatch(app: Arc<App>, request: Request) -> Result<Response, ApiError>
                 }
                 if remove {
                     app.files.remove(&rel)?;
+                    if protections.remove(&rel).is_some() {
+                        app.save_protections(&protections)?;
+                    }
                     if entries.remove(&rel).is_some() {
                         app.save_expirations(&entries)?;
                     }
@@ -427,11 +454,37 @@ async fn dispatch(app: Arc<App>, request: Request) -> Result<Response, ApiError>
     }
     let rel =
         user_path(&path).map_err(|_| ApiError::new(StatusCode::FORBIDDEN, "Invalid file path"))?;
+    let expected = app.protections.lock().unwrap().get(&rel).cloned();
+    if expected.is_some()
+        && method == Method::GET
+        && !headers.contains_key(crate::password::HEADER)
+        && header(&headers, "accept").contains("text/html")
+    {
+        let mut result = response(StatusCode::OK, include_str!("../templates/unlock.html"));
+        result
+            .headers_mut()
+            .insert("content-type", "text/html; charset=utf-8".parse().unwrap());
+        result.headers_mut().insert("content-security-policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'".parse().unwrap());
+        return Ok(result);
+    }
+    crate::password::verify(&app, &headers, expected.clone()).await?;
     let a = app.clone();
     let r = rel.clone();
-    let file = tokio::task::spawn_blocking(move || a.files.open_file(&r, OFlags::RDONLY, 0))
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))??;
+    let file = tokio::task::spawn_blocking(move || {
+        // Open the exact authorized version while installation holds this same lock.
+        let protections = a.protections.lock().unwrap();
+        if protections.get(&r) != expected.as_ref() {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "File protection changed; retry",
+            ));
+        }
+        a.files
+            .open_file(&r, OFlags::RDONLY, 0)
+            .map_err(ApiError::from)
+    })
+    .await
+    .map_err(|e| ApiError::internal(e.to_string()))??;
     if file.metadata()?.is_dir() {
         if !path.ends_with('/') {
             let mut result = response(StatusCode::FOUND, Body::empty());

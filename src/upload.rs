@@ -43,6 +43,10 @@ pub struct Upload {
     pub complete: bool,
     pub temporary: bool,
     #[serde(default)]
+    pub password_hash: Option<String>,
+    #[serde(default)]
+    pub expected_password_hash: Option<String>,
+    #[serde(default)]
     pub expires_at: i64,
     #[serde(default)]
     pub deleted: bool,
@@ -115,6 +119,16 @@ impl Upload {
         if !self.sha256.is_empty() {
             headers.insert("upload-sha256", self.sha256.parse().unwrap());
         }
+        if self.complete
+            && let Some(hash) = &self.password_hash
+        {
+            headers.insert(
+                "file-location",
+                crate::password::location(&self.target, hash)
+                    .parse()
+                    .unwrap(),
+            );
+        }
         if self.complete && self.expires_at > 0 {
             headers.insert("file-expires-at", self.expires_at.into());
         }
@@ -139,7 +153,13 @@ impl Upload {
             self.finalizing = true;
             self.persist(app)?;
         }
-        self.expires_at = app.install(&self.id, &self.target, self.temporary)?;
+        self.expires_at = app.install(
+            &self.id,
+            &self.target,
+            self.temporary,
+            self.password_hash.as_deref(),
+            self.expected_password_hash.as_deref(),
+        )?;
         self.complete = true;
         self.finalizing = false;
         self.length = self.offset;
@@ -332,9 +352,12 @@ pub async fn put(
     app: Arc<App>,
     path: &str,
     temporary: bool,
+    headers: HeaderMap,
     body: Body,
 ) -> Result<Response, ApiError> {
     let target = target(&app, path)?;
+    let expected = crate::password::authorize(&app, &target, &headers).await?;
+    let password_hash = crate::password::for_upload(&app, &headers, &expected).await?;
     let id = format!("put-{}", new_id()?);
     let result = async {
         let (_, interrupted) = write_body(app.clone(), id.clone(), 0, body).await?;
@@ -343,13 +366,30 @@ pub async fn put(
         }
         let a = app.clone();
         let i = id.clone();
-        let expires = tokio::task::spawn_blocking(move || a.install(&i, &target, temporary))
-            .await
-            .map_err(|e| ApiError::internal(e.to_string()))??;
+        let installed_target = target.clone();
+        let expires = tokio::task::spawn_blocking(move || {
+            a.install(
+                &i,
+                &target,
+                temporary,
+                password_hash.as_deref(),
+                expected.as_deref(),
+            )
+        })
+        .await
+        .map_err(|e| ApiError::internal(e.to_string()))??;
         let mut result = response(
             StatusCode::CREATED,
             format!("File uploaded successfully to {path}\n"),
         );
+        if let Some(hash) = app.protections.lock().unwrap().get(&installed_target) {
+            result.headers_mut().insert(
+                "file-location",
+                crate::password::location(&installed_target, hash)
+                    .parse()
+                    .unwrap(),
+            );
+        }
         if expires > 0 {
             result
                 .headers_mut()
@@ -370,6 +410,7 @@ pub async fn create(
 ) -> Result<Response, ApiError> {
     let complete = sf_bool(&headers, "upload-complete")?;
     let target = target(&app, path)?;
+    let expected = crate::password::authorize(&app, &target, &headers).await?;
     let content_length = header(&headers, "content-length").parse::<u64>().ok();
     let content_length = if content_length.is_none() && !headers.contains_key("transfer-encoding") {
         Some(0)
@@ -441,6 +482,10 @@ pub async fn create(
                 && u.temporary == temporary
                 && (Utc::now() - u.updated_at).num_seconds() < AGE
             {
+                crate::password::verify(&app, &headers, u.password_hash.clone()).await?;
+                if u.password_hash.is_none() && headers.contains_key(crate::password::HEADER) {
+                    continue;
+                }
                 u.updated_at = Utc::now();
                 persist(app.clone(), &u).await?;
                 let mut result = response(StatusCode::OK, Body::empty());
@@ -455,6 +500,7 @@ pub async fn create(
             }
         }
     }
+    let password_hash = crate::password::for_upload(&app, &headers, &expected).await?;
     let id = new_id()?;
     let mut u = Upload {
         version: 1,
@@ -467,6 +513,8 @@ pub async fn create(
         length_known: length.is_some(),
         complete: false,
         temporary,
+        password_hash,
+        expected_password_hash: expected,
         expires_at: 0,
         deleted: false,
         finalizing: false,
@@ -537,6 +585,7 @@ pub async fn resource(
     } else {
         entry.state.lock().await
     };
+    crate::password::verify(&app, &headers, u.password_hash.clone()).await?;
     if u.deleted {
         return Err(ApiError::not_found());
     }
